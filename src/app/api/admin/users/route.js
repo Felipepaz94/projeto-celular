@@ -75,7 +75,10 @@ export async function POST(request) {
       full_name: fullName || null,
       role,
     });
-    if (profileError) return jsonError(profileError.message, 400);
+    if (profileError) {
+      await adminClient.auth.admin.deleteUser(created.user.id);
+      return jsonError(profileError.message, 400);
+    }
 
     return NextResponse.json({user: created.user});
   } catch (error) {

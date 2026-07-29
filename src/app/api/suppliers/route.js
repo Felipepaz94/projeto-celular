@@ -50,15 +50,18 @@ export async function POST(request) {
       const {data: documents, error: documentError} = await admin
         .from("clientes").select("id,nome,documento").not("documento", "is", null);
       if (documentError) throw documentError;
-      const duplicate = documents.find(item => documentDigits(item.documento) === digits);
+      const duplicate = documents.find(item =>
+        documentDigits(item.documento) === digits
+        && String(item.nome || "").trim().toLowerCase() !== nome.toLowerCase()
+      );
       if (duplicate) return fail(`CPF/CNPJ já cadastrado para ${duplicate.nome}.`, 409);
     }
 
     const {data: existingSupplier, error: existingSupplierError} = await admin
-      .from("suppliers").select("name").eq("name", nome).maybeSingle();
+      .from("suppliers").select("name").ilike("name", nome).limit(1).maybeSingle();
     if (existingSupplierError) throw existingSupplierError;
     const supplierResult = existingSupplier
-      ? await admin.from("suppliers").update({ativo: true, inativado_em: null, atualizado_por: userId}).eq("name", nome).select("name").single()
+      ? await admin.from("suppliers").update({name: nome, ativo: true, inativado_em: null, atualizado_por: userId}).eq("name", existingSupplier.name).select("name").single()
       : await admin.from("suppliers").insert({name: nome, ativo: true, criado_por: userId, atualizado_por: userId}).select("name").single();
     const {data: supplier, error: supplierError} = supplierResult;
     if (supplierError) throw supplierError;
