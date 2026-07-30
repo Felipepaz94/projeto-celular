@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   {key: "clientes", label: "Clientes e fornecedores", icon: "ti-address-book", countKey: "clientes"},
   {key: "pdv", label: "PDV", icon: "ti-shopping-cart"},
   {key: "historico", label: "Vendas", icon: "ti-receipt", countKey: "sales"},
+  {key: "comissoes", label: "Comissoes", icon: "ti-percentage"},
   {key: "fabricantes", label: "Fabricantes", icon: "ti-building-factory-2", countKey: "fabricantes"},
   {key: "usuarios", label: "Usuários", icon: "ti-users", supabaseOnly: true},
   {key: "config", label: "Configurações", icon: "ti-settings"},

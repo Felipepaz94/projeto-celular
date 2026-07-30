@@ -747,6 +747,16 @@ function isMissingFabricantesTable(error) {
   const message = String(error?.message || error?.details || "").toLowerCase();
   return error?.code === "PGRST205" || message.includes("fabricantes") && message.includes("schema cache");
 }
+
+async function ensureSupplierRecord(name) {
+  const supplierName = String(name || "").trim();
+  if (!supplierName) return;
+  dbThrow(await supabaseClient.from("suppliers").upsert(
+    {name: supplierName, ativo: true, inativado_em: null},
+    {onConflict: "name"},
+  ));
+}
+
 function showInactiveRecords() {
   return normalizeRole(activeProfile?.role) === "admin";
 }
@@ -796,6 +806,7 @@ const supabaseDb = {
       await supabaseDb.assertImeiAvailable(product.identifier);
     }
     const row = productToDb(product);
+    await ensureSupplierRecord(row.fornecedor);
     const {data: authData} = await supabaseClient.auth.getSession();
     if (authData.session?.user?.id) {
       row.criado_por = authData.session.user.id;
@@ -814,6 +825,7 @@ const supabaseDb = {
       }
     }
     const clean = productPatchToDb(patch);
+    await ensureSupplierRecord(clean.fornecedor);
     const {data: authData} = await supabaseClient.auth.getSession();
     if (authData.session?.user?.id) clean.atualizado_por = authData.session.user.id;
     const data = dbThrow(await supabaseClient.from("products").update(clean).eq("id", id).select("*").single());
@@ -977,7 +989,9 @@ const supabaseDb = {
       const duplicate = rows.find(row => String(row.documento || "").replace(/\D/g, "") === digits);
       if (duplicate) throw new Error(`CPF/CNPJ já cadastrado para ${duplicate.nome}.`);
     }
-    const data = dbThrow(await supabaseClient.from("clientes").insert({nome: nome.trim(), contato: (contato || "").trim() || null, email: (email || "").trim() || null, documento: (documento || "").trim() || null, observacoes: (observacoes || "").trim() || null, cliente: Boolean(cliente), fornecedor: Boolean(fornecedor)}).select("*").single());
+    const normalizedName = nome.trim();
+    if (fornecedor) await ensureSupplierRecord(normalizedName);
+    const data = dbThrow(await supabaseClient.from("clientes").insert({nome: normalizedName, contato: (contato || "").trim() || null, email: (email || "").trim() || null, documento: (documento || "").trim() || null, observacoes: (observacoes || "").trim() || null, cliente: Boolean(cliente), fornecedor: Boolean(fornecedor)}).select("*").single());
     return clienteFromDb(data);
   },
   async updateCliente(id, patch) {
@@ -998,7 +1012,11 @@ const supabaseDb = {
     if (Object.prototype.hasOwnProperty.call(patch, "observacoes")) clean.observacoes = patch.observacoes || null;
     if (Object.prototype.hasOwnProperty.call(patch, "cliente")) clean.cliente = Boolean(patch.cliente);
     if (Object.prototype.hasOwnProperty.call(patch, "fornecedor")) clean.fornecedor = Boolean(patch.fornecedor);
-    const data = dbThrow(await supabaseClient.from("clientes").update(clean).eq("id", id).select("*").single());
+    if (clean.fornecedor) {
+      const current = dbThrow(await supabaseClient.from("clientes").select("nome").eq("id", id).single());
+      await ensureSupplierRecord(clean.nome || current.nome);
+    }
+    const data = dbThrow(await supabaseClient.from("clientes").update(clean).eq("id", id).select("*").single());
     return clienteFromDb(data);
   },
   async listProtecaoPlanos() {
@@ -1007,7 +1025,10 @@ const supabaseDb = {
     return dbThrow(await query);
   },
   async addProtecaoPlano({modelo, valor}) {
-    dbThrow(await supabaseClient.from("protecao_planos").insert({modelo: modelo.trim(), valor: Number(valor) || 0}));
+    dbThrow(await supabaseClient.from("protecao_planos").upsert(
+      {modelo: modelo.trim(), valor: Number(valor) || 0, ativo: true, inativado_em: null},
+      {onConflict: "modelo"},
+    ));
     return supabaseDb.listProtecaoPlanos();
   },
   async updateProtecaoPlano(id, patch) {
@@ -1024,7 +1045,10 @@ const supabaseDb = {
   async replaceProtecaoPlanos(rows) {
     dbThrow(await supabaseClient.from("protecao_planos").update({ativo: false, inativado_em: new Date().toISOString()}).eq("ativo", true));
     const clean = rows.map(r => ({modelo: String(r.modelo).trim(), valor: Number(r.valor) || 0})).filter(r => r.modelo);
-    if (clean.length) dbThrow(await supabaseClient.from("protecao_planos").insert(clean));
+    if (clean.length) dbThrow(await supabaseClient.from("protecao_planos").upsert(
+      clean.map(row => ({...row, ativo: true, inativado_em: null})),
+      {onConflict: "modelo"},
+    ));
     return supabaseDb.listProtecaoPlanos();
   },
   async listBandeiras() {
@@ -1064,6 +1088,37 @@ const supabaseDb = {
     });
     if (rows.length) dbThrow(await supabaseClient.from("taxas_cartao").upsert(rows.map(row => ({...row, ativo: true, inativado_em: null})), {onConflict: "bandeira,parcelas"}));
     return supabaseDb.getTaxasCartao();
+  },
+  async listCommissionRates() {
+    const [ratesResult, settingsResult] = await Promise.all([
+      supabaseClient.from("comissoes_vendedores").select("user_id,percentual"),
+      supabaseClient.from("configuracoes_empresa").select("percentual_comissao_padrao").eq("id", 1).maybeSingle(),
+    ]);
+    const data = dbThrow(ratesResult);
+    if (settingsResult.error) throw settingsResult.error;
+    return {
+      rates: Object.fromEntries(data.map(row => [row.user_id, Number(row.percentual) || 0])),
+      defaultRate: Number(settingsResult.data?.percentual_comissao_padrao ?? DEFAULT_COMMISSION_RATE),
+    };
+  },
+  async setCommissionRates(values, defaultRate) {
+    const normalizedDefault = Math.min(100, Math.max(0, Number(defaultRate) || 0));
+    dbThrow(await supabaseClient.from("configuracoes_empresa").upsert({
+      id: 1,
+      percentual_comissao_padrao: normalizedDefault,
+      updated_at: new Date().toISOString(),
+      ativo: true,
+      inativado_em: null,
+    }, {onConflict: "id"}));
+    const rows = Object.entries(values).map(([userId, percentual]) => ({
+      user_id: userId,
+      percentual: Math.min(100, Math.max(0, Number(percentual) || 0)),
+      ativo: true,
+      inativado_em: null,
+      updated_at: new Date().toISOString(),
+    }));
+    if (rows.length) dbThrow(await supabaseClient.from("comissoes_vendedores").upsert(rows, {onConflict: "user_id"}));
+    return supabaseDb.listCommissionRates();
   },
   async addTradeIn(data) {
     if (data.fornecedor) {
@@ -1193,6 +1248,10 @@ async function syncLocalStorageToSupabase() {
     }
   }
 
+  if (supplierRows.length) dbThrow(await supabaseClient.from("suppliers").upsert(
+    supplierRows.map(row => ({...row, ativo: true, inativado_em: null})),
+    {onConflict: "name"},
+  ));
   if (productRowsWithIds.length) dbThrow(await supabaseClient.from("products").upsert(productRowsWithIds, {onConflict: "id"}));
   for (const item of productsWithoutIds) {
     const saved = dbThrow(await supabaseClient.from("products").insert(item.row).select("id").single());
@@ -1322,6 +1381,17 @@ async function signInUser({email, password}) {
   return data;
 }
 
+async function requestPasswordReset(email) {
+  const redirectTo = `${window.location.origin}${window.location.pathname}`;
+  const {error} = await supabaseClient.auth.resetPasswordForEmail(email, {redirectTo});
+  if (error) throw error;
+}
+
+async function updateCurrentUserPassword(password) {
+  const {error} = await supabaseClient.auth.updateUser({password});
+  if (error) throw error;
+}
+
 async function signUpUser({email, password, fullName}) {
   const {data, error} = await supabaseClient.auth.signUp({
     email,
@@ -1378,7 +1448,7 @@ function newUserForm() {
 }
 
 const ROLE_TABS = {
-  admin: ["cadastro", "estoque", "clientes", "pdv", "historico", "fabricantes", "usuarios", "config"],
+  admin: ["cadastro", "estoque", "clientes", "pdv", "historico", "comissoes", "fabricantes", "usuarios", "config"],
   vendedor: ["clientes", "pdv"],
 };
 
@@ -2465,7 +2535,7 @@ function EditProductModal({product, suppliers, onAddSupplier, onSave, onCancel})
   );
 }
 
-function Estoque({products, usersById, clientes, bandeiras, taxasCartao, onAddCliente, onDelete, onRestore, onUpdate, onReviewTradeIn, onDirectSale, suppliers, onAddSupplier, reload}) {
+function Estoque({products, usersById, clientes, bandeiras, taxasCartao, defaultCommissionRate, onAddCliente, onDelete, onRestore, onUpdate, onReviewTradeIn, onDirectSale, suppliers, onAddSupplier, reload}) {
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState("");
   const [approvalFilter, setApprovalFilter] = useState(false);
@@ -2474,7 +2544,6 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, onAddCl
   const [toDelete, setToDelete] = useState(null);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [toEdit, setToEdit] = useState(null);
-  const [comissaoPct, setComissaoPct] = useState("5");
   const [copied, setCopied] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState({});
   const [page, setPage] = useState(1);
@@ -2529,12 +2598,13 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, onAddCl
     const inativosReprovados = productsInPeriod.filter(p => !isSold(p) && (p.ativo === false || isRejected(p))).reduce((acc, p) => acc + Math.max(qtyOf(p), 1), 0);
     const valorCusto = productsInPeriod.reduce((acc, p) => acc + Number(p.custo || 0) * qtyOf(p), 0);
     const valorVenda = productsInPeriod.reduce((acc, p) => acc + Number(p.venda || 0) * qtyOf(p), 0);
-    const pct = Number(comissaoPct) || 0;
-    const comissao = valorVenda * (pct / 100);
-    const lucroLiquido = valorVenda - valorCusto - comissao;
-    const margemLiquidaPct = valorVenda > 0 ? (lucroLiquido / valorVenda) * 100 : 0;
-    return {totalItens, vendidos, aguardando, aCompletar, semEstoque, inativosReprovados, valorCusto, valorVenda, comissao, lucroLiquido, margemLiquidaPct};
-  }, [products, comissaoPct, startDate, endDate]);
+    const lucroPotencial = valorVenda - valorCusto;
+    const margemPotencialPct = valorVenda > 0 ? (lucroPotencial / valorVenda) * 100 : 0;
+    const percentualComissao = Number(defaultCommissionRate) || 0;
+    const comissao = valorVenda * percentualComissao / 100;
+    const lucroAposComissao = lucroPotencial - comissao;
+    return {totalItens, vendidos, aguardando, aCompletar, semEstoque, inativosReprovados, valorCusto, valorVenda, lucroPotencial, margemPotencialPct, percentualComissao, comissao, lucroAposComissao};
+  }, [products, defaultCommissionRate, startDate, endDate]);
 
   const handleDelete = async () => {
     if (toDelete) {
@@ -2572,22 +2642,10 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, onAddCl
       <div className="stat-row stock-stat-row stock-value-stats">
         <div className="stat"><div className="sl">Valor em custo</div><div className="sv">{formatBRL(stats.valorCusto)}</div></div>
         <div className="stat"><div className="sl">Valor em venda</div><div className="sv">{formatBRL(stats.valorVenda)}</div></div>
-        <div className="stat">
-          <div className="sl" style={{display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6}}>
-            <span>Comissão</span>
-            <span style={{display: "flex", alignItems: "center", gap: 2}}>
-              <input
-                type="number" min="0" max="100" step="0.5" value={comissaoPct}
-                onChange={e => setComissaoPct(e.target.value)}
-                style={{width: 38, background: "var(--bg-elev2)", border: "0.5px solid var(--line-strong)", borderRadius: 5, color: "var(--ink)", fontSize: 11, fontFamily: "var(--font-mono)", padding: "2px 4px", textAlign: "right"}}
-              />
-              <span style={{fontSize: 11}}>%</span>
-            </span>
-          </div>
-          <div className="sv">{formatBRL(stats.comissao)}</div>
-        </div>
-        <div className="stat"><div className="sl">Margem líquida</div><div className="sv">{stats.margemLiquidaPct.toFixed(1)}%</div></div>
-        <div className="stat"><div className="sl">Lucro líquido</div><div className="sv">{formatBRL(stats.lucroLiquido)}</div></div>
+        <div className="stat"><div className="sl">Comissão ({stats.percentualComissao.toFixed(2)}%)</div><div className="sv">{formatBRL(stats.comissao)}</div></div>
+        <div className="stat"><div className="sl">Margem potencial</div><div className="sv">{stats.margemPotencialPct.toFixed(1)}%</div></div>
+        <div className="stat"><div className="sl">Lucro potencial</div><div className="sv">{formatBRL(stats.lucroPotencial)}</div></div>
+        <div className="stat"><div className="sl">Lucro após comissão</div><div className="sv">{formatBRL(stats.lucroAposComissao)}</div></div>
       </div>
 
       <div className="inventory-filter-toolbar">
@@ -3033,6 +3091,12 @@ function printSaleReceipt(sale, asPdf) {
     window.print();
 }
 
+function saleFinalTotal(sale) {
+  const payments = Array.isArray(sale?.pagamentos) ? sale.pagamentos : [];
+  if (!payments.length) return Number(sale?.total) || 0;
+  return payments.reduce((total, payment) => total + (Number(payment.valor) || 0), 0);
+}
+
 function SaleReceiptModal({receipt, companySettings, onClose}) {
   const {sale, tradeIns = []} = receipt;
   const paymentLabel = forma => FORMAS_PAGAMENTO.find(item => item.key === forma)?.label || forma;
@@ -3058,7 +3122,7 @@ function SaleReceiptModal({receipt, companySettings, onClose}) {
             {cardInterest > 0 && <div className="receipt-row receipt-interest-row"><span>Juros do cartão<small>Valor adicional cobrado pela operadora · taxa {payment.taxaPct}%</small></span><strong>+ {formatBRL(cardInterest)}</strong></div>}
           </div>;
         })}</div>
-        <div className="receipt-total"><span><BadgeDollarSign size={18} aria-hidden="true" />Total da venda</span><strong>{formatBRL(sale.total)}</strong></div>
+        <div className="receipt-total"><span><BadgeDollarSign size={18} aria-hidden="true" />Total da venda</span><strong>{formatBRL(saleFinalTotal(sale))}</strong></div>
         <div className="row receipt-print-actions"><button className="btn receipt-pdf-button" type="button" onClick={() => printSaleReceipt(sale, true)}><FileDown size={17} aria-hidden="true" />Gerar PDF</button><button className="btn receipt-print-button" type="button" onClick={() => printSaleReceipt(sale, false)}><Printer size={17} aria-hidden="true" />Imprimir</button><button className="btn primary" type="button" onClick={onClose}>Fechar comprovante</button></div>
       </div>
     </div>
@@ -3322,6 +3386,12 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
   const total = useMemo(() => cart.reduce((acc, c) => acc + c.vendaUnit * c.quantidade, 0), [cart]);
 
   const taxaDe = (bandeira, parcelas) => Number((taxasCartao[bandeira] || {})[parcelas]) || 0;
+  const totalJurosCartao = useMemo(() => pagamentos.reduce((totalJuros, payment) => {
+    if (payment.forma !== "cartao_credito") return totalJuros;
+    const valorBase = Number(payment.valor) || 0;
+    return totalJuros + valorBase * taxaDe(payment.bandeira, payment.parcelas) / 100;
+  }, 0), [pagamentos, taxasCartao]);
+  const totalFinal = total + totalJurosCartao;
 
   // O saldo da venda é calculado só com os valores "base" (o que cobre o preço
   // da venda). A taxa do cartão é um acréscimo que o cliente paga a mais em
@@ -3417,7 +3487,7 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
           const valor = Number(p.valor) || 0;
           return {forma: p.forma, valorBase: valor, taxaPct: 0, valorTaxa: 0, valor, bandeira: null, parcelas: null};
         }),
-        total,
+        total: totalFinal,
       });
       setReceipt({sale, tradeIns: tradeIns.map(item => ({...item}))});
       setSaleToast(true);
@@ -3626,7 +3696,9 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
         {errors.pagamentos && <div className="err" style={{marginTop: 8}}>{errors.pagamentos}</div>}
 
         <div className="cart-summary">
-          <div className="row sale-total"><span>Total da venda</span><strong>{formatBRL(total)}</strong></div>
+          <div className="row sale-total"><span>Subtotal dos produtos</span><strong>{formatBRL(total)}</strong></div>
+          {totalJurosCartao > 0 && <div className="row total"><span>Juros do cartão</span><span>+ {formatBRL(totalJurosCartao)}</span></div>}
+          <div className="row sale-total"><span>Total final da venda</span><strong>{formatBRL(totalFinal)}</strong></div>
           {pagamentos.length > 0 && (
             saldo > 0.01 ? (
               <div className="row total"><span>Total a pagar</span><span>{formatBRL(saldo)}</span></div>
@@ -3701,7 +3773,7 @@ function EstornoVendaModal({sale, onConfirm, onCancel}) {
     <div className="modal-bg" onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
       <div className="modal">
         <h3><RotateCcw size={18} aria-hidden="true" />Estornar venda</h3>
-        <p>Tem certeza que deseja estornar a venda de <strong>{formatBRL(sale.total)}</strong>? Todos os produtos serão devolvidos ao estoque e a venda será marcada como estornada.</p>
+        <p>Tem certeza que deseja estornar a venda de <strong>{formatBRL(saleFinalTotal(sale))}</strong>? Todos os produtos serão devolvidos ao estoque e a venda será marcada como estornada.</p>
         <Field label="Motivo (opcional)">
           <input type="text" value={motivo} placeholder="Ex: cliente desistiu, defeito..." onChange={e => setMotivo(e.target.value)} autoFocus />
         </Field>
@@ -3788,7 +3860,7 @@ function SaleDetailsModal({sale, tradeIns, usersById, clientDocument, companySet
             {cardInterest > 0 && <div className="receipt-row receipt-interest-row"><span>Juros do cartão<small>Valor adicional cobrado pela operadora · taxa {payment.taxaPct}%</small></span><strong>+ {formatBRL(cardInterest)}</strong></div>}
           </div>;
         })}</div>
-        <div className="receipt-total"><span><BadgeDollarSign size={18} aria-hidden="true" />Total da venda</span><strong>{formatBRL(sale.total)}</strong></div>
+        <div className="receipt-total"><span><BadgeDollarSign size={18} aria-hidden="true" />Total da venda</span><strong>{formatBRL(saleFinalTotal(sale))}</strong></div>
         <div className="sale-details-footer receipt-print-actions"><button className="btn receipt-pdf-button" type="button" onClick={() => printSaleReceipt(sale, true)}><FileDown size={17} aria-hidden="true" />Gerar PDF</button><button className="btn receipt-print-button" type="button" onClick={() => printSaleReceipt(sale, false)}><Printer size={17} aria-hidden="true" />Imprimir</button>{sale.status !== "estornada" && <button className="btn sale-void-button" type="button" onClick={onEstornarVenda}><RotateCcw size={17} aria-hidden="true" />Estornar venda</button>}</div>
       </div>
     </div>
@@ -3821,7 +3893,12 @@ function Historico({sales, products, clientes, usersById, companySettings, reloa
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   // Total "líquido" da venda: soma só os itens ainda ativos (descontando estornos)
-  const totalAtivo = (s) => s.itens.filter(i => i.status === "ativo").reduce((acc, i) => acc + i.vendaUnit * i.quantidade, 0);
+  const totalAtivo = (s) => {
+    const activeBase = s.itens.filter(i => i.status === "ativo").reduce((acc, i) => acc + i.vendaUnit * i.quantidade, 0);
+    const originalBase = s.itens.reduce((acc, i) => acc + i.vendaUnit * i.quantidade, 0);
+    const interest = (s.pagamentos || []).reduce((acc, payment) => acc + (Number(payment.valorTaxa) || 0), 0);
+    return activeBase + (originalBase > 0 ? interest * activeBase / originalBase : 0);
+  };
 
   const stats = useMemo(() => {
     const totalVendido = filtered.reduce((acc, s) => acc + totalAtivo(s), 0);
@@ -4454,19 +4531,202 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
   );
 }
 
-function LoginScreen({onAuthenticated}) {
+function commissionableSaleTotal(sale) {
+  if (!Array.isArray(sale.itens)) return sale.status === "estornada" ? 0 : Number(sale.total) || 0;
+  return sale.itens
+    .filter(item => item.status === "ativo")
+    .reduce((total, item) => total + (Number(item.vendaUnit) || 0) * (Number(item.quantidade) || 0), 0);
+}
+
+const DEFAULT_COMMISSION_RATE = 5;
+
+function CommissionsPanel({sales, users, products, clientes, companySettings, rates, defaultRate, onSaveRates, onEstornarVenda}) {
+  const [startDate, setStartDate] = useState(getDefaultStartDate);
+  const [endDate, setEndDate] = useState(() => toDateInputValue(new Date()));
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [draftRates, setDraftRates] = useState(rates);
+  const [draftDefaultRate, setDraftDefaultRate] = useState(defaultRate);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [showRatesModal, setShowRatesModal] = useState(false);
+  const [sellerQuery, setSellerQuery] = useState("");
+  const [sellerPage, setSellerPage] = useState(1);
+  const [expandedSellers, setExpandedSellers] = useState({});
+  const [selectedSale, setSelectedSale] = useState(null);
+  const [estornoTarget, setEstornoTarget] = useState(null);
+  const SELLERS_PER_PAGE = 10;
+
+  const commissionPeriodSales = useMemo(() => sales.filter(sale =>
+    sale.criadoPor
+    && sale.status !== "estornada"
+    && isWithinDateRange(sale.criadoEm, startDate, endDate)
+  ), [sales, startDate, endDate]);
+  const periodSales = useMemo(() => commissionPeriodSales.filter(sale => !selectedUserId || sale.criadoPor === selectedUserId), [commissionPeriodSales, selectedUserId]);
+
+  const sellers = useMemo(() => {
+    const usersById = new Map(users.map(user => [user.id, user]));
+    sales.forEach(sale => {
+      if (sale.criadoPor && !usersById.has(sale.criadoPor)) {
+        usersById.set(sale.criadoPor, {id: sale.criadoPor, full_name: "Usuario removido", email: ""});
+      }
+    });
+    return [...usersById.values()].sort((a, b) => String(a.full_name || a.email).localeCompare(String(b.full_name || b.email), "pt-BR"));
+  }, [sales, users]);
+
+  useEffect(() => {
+    setDraftDefaultRate(defaultRate);
+    setDraftRates(Object.fromEntries(sellers.map(user => [user.id, rates[user.id] ?? defaultRate])));
+  }, [rates, defaultRate, sellers]);
+
+  const summaries = useMemo(() => sellers
+    .filter(user => !selectedUserId || user.id === selectedUserId)
+    .map(user => {
+      const userSales = periodSales.filter(sale => sale.criadoPor === user.id);
+      const base = userSales.reduce((total, sale) => total + commissionableSaleTotal(sale), 0);
+      const rate = Number(draftRates[user.id] ?? draftDefaultRate) || 0;
+      return {user, salesCount: userSales.length, base, rate, commission: base * rate / 100};
+    }), [sellers, selectedUserId, periodSales, draftRates, draftDefaultRate]);
+
+  const sellerRateRows = useMemo(() => sellers.map(user => {
+    const userSales = commissionPeriodSales.filter(sale => sale.criadoPor === user.id);
+    const base = userSales.reduce((total, sale) => total + commissionableSaleTotal(sale), 0);
+    const rate = Number(draftRates[user.id] ?? draftDefaultRate) || 0;
+    return {user, salesCount: userSales.length, base, rate, commission: base * rate / 100};
+  }), [sellers, commissionPeriodSales, draftRates, draftDefaultRate]);
+  const filteredSellerRows = useMemo(() => {
+    const query = sellerQuery.trim().toLocaleLowerCase("pt-BR");
+    if (!query) return sellerRateRows;
+    return sellerRateRows.filter(row => `${row.user.full_name || ""} ${row.user.email || ""}`.toLocaleLowerCase("pt-BR").includes(query));
+  }, [sellerRateRows, sellerQuery]);
+  const sellerTotalPages = Math.max(1, Math.ceil(filteredSellerRows.length / SELLERS_PER_PAGE));
+  const sellerCurrentPage = Math.min(sellerPage, sellerTotalPages);
+  const visibleSellerRows = filteredSellerRows.slice((sellerCurrentPage - 1) * SELLERS_PER_PAGE, sellerCurrentPage * SELLERS_PER_PAGE);
+  useEffect(() => setSellerPage(1), [sellerQuery, showRatesModal]);
+  useEffect(() => { if (sellerPage > sellerTotalPages) setSellerPage(sellerTotalPages); }, [sellerPage, sellerTotalPages]);
+
+  const totals = summaries.reduce((acc, row) => ({
+    sales: acc.sales + row.salesCount,
+    base: acc.base + row.base,
+    commission: acc.commission + row.commission,
+  }), {sales: 0, base: 0, commission: 0});
+  const sellerSaleGroups = useMemo(() => summaries.filter(summary => summary.salesCount > 0).map(summary => ({
+    ...summary,
+    sales: periodSales.filter(sale => sale.criadoPor === summary.user.id),
+  })), [summaries, periodSales]);
+
+  const saveRates = async () => {
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      await onSaveRates(Object.fromEntries(sellers.map(user => [user.id, draftRates[user.id] ?? draftDefaultRate])), draftDefaultRate);
+      setMessage("Percentuais de comissao salvos.");
+      setShowRatesModal(false);
+    } catch (err) {
+      setError(err.message || "Nao foi possivel salvar os percentuais.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCommissionSaleVoid = async motivo => {
+    await onEstornarVenda(estornoTarget.id, motivo);
+    setEstornoTarget(null);
+    setSelectedSale(null);
+  };
+
+  const printCommissionReport = () => {
+    const previousTitle = document.title;
+    document.title = `relatorio-comissoes-${startDate || "inicio"}-${endDate || "fim"}`;
+    document.documentElement.classList.add("printing-commission-report");
+    toast.info('Na janela de impressão, escolha "Salvar como PDF".');
+    const cleanup = () => {
+      document.documentElement.classList.remove("printing-commission-report");
+      document.title = previousTitle;
+    };
+    window.addEventListener("afterprint", cleanup, {once: true});
+    window.print();
+  };
+
+  return (
+    <div className="commissions-page">
+      <div className="panel commissions-panel">
+        <div className="panel-head"><div><h2><i className="ti ti-percentage" aria-hidden="true"></i>Comissoes por vendedor</h2><span className="sub">calculadas sobre os itens ativos das vendas</span></div><button className="btn receipt-pdf-button" type="button" onClick={printCommissionReport}><FileDown size={17} aria-hidden="true" />Gerar PDF</button></div>
+        <div className="commissions-filters">
+          <Field label="Percentual geral"><div className="commission-rate"><input type="number" min="0" max="100" step="0.01" value={draftDefaultRate} onChange={event => { const next = event.target.value; setDraftDefaultRate(next); setDraftRates(previous => Object.fromEntries(sellers.map(user => [user.id, rates[user.id] ?? next ?? previous[user.id]]))); }} /><span>%</span></div></Field>
+          <Field label="Data inicial"><input type="date" value={startDate} onChange={event => setStartDate(event.target.value)} /></Field>
+          <Field label="Data final"><input type="date" value={endDate} onChange={event => setEndDate(event.target.value)} /></Field>
+          <Field label="Vendedor"><select value={selectedUserId} onChange={event => setSelectedUserId(event.target.value)}><option value="">Todos</option>{sellers.map(user => <option key={user.id} value={user.id}>{user.full_name || user.email}</option>)}</select></Field>
+        </div>
+        <div className="commission-totals">
+          <div><span>Vendas no periodo</span><strong>{totals.sales}</strong></div>
+          <div><span>Base comissionavel</span><strong>{formatBRL(totals.base)}</strong></div>
+          <div><span>Total de comissoes</span><strong>{formatBRL(totals.commission)}</strong></div>
+        </div>
+        {error && <div className="auth-alert danger">{error}</div>}
+        {message && <div className="auth-alert ok">{message}</div>}
+        <div className="commission-actions"><button className="btn primary" type="button" onClick={() => setShowRatesModal(true)}><i className="ti ti-users" aria-hidden="true"></i>Gerenciar percentuais dos vendedores</button></div>
+      </div>
+      <div className="panel commissions-panel"><div className="panel-head"><div><h2><i className="ti ti-receipt" aria-hidden="true"></i>Vendas consideradas</h2><span className="sub">clique no vendedor e depois na venda para ver todos os detalhes</span></div></div>
+        <div className="commission-seller-groups">
+          {sellerSaleGroups.map(group => { const expanded = Boolean(expandedSellers[group.user.id]); return <div className="commission-seller-group" key={group.user.id}>
+            <button type="button" className="commission-seller-trigger" onClick={() => setExpandedSellers(previous => ({...previous, [group.user.id]: !previous[group.user.id]}))} aria-expanded={expanded}>
+              <div><strong>{group.user.full_name || group.user.email}</strong><span>{group.user.email}</span></div><div className="commission-seller-summary"><span>{group.salesCount} {group.salesCount === 1 ? "venda" : "vendas"}</span><span>Base: <b>{formatBRL(group.base)}</b></span><span>Comissao: <b>{formatBRL(group.commission)}</b></span><i className={`ti ti-chevron-${expanded ? "up" : "down"}`} aria-hidden="true"></i></div>
+            </button>
+            {expanded && <div className="commission-table-wrap"><table className="stock commission-table commission-sales-table"><thead><tr><th>Data</th><th>Cliente</th><th>Status</th><th>Base</th><th>Comissao</th></tr></thead><tbody>
+              {group.sales.map(sale => { const base = commissionableSaleTotal(sale); const rate = Number(draftRates[sale.criadoPor] ?? draftDefaultRate) || 0; return <tr key={sale.id} className="stock-clickable-row" tabIndex={0} onClick={() => setSelectedSale(sale)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSale(sale); } }}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{sale.status === "parcialmente_estornada" ? "Parcialmente estornada" : "Ativa"}</td><td>{formatBRL(base)}</td><td className="commission-value">{formatBRL(base * rate / 100)}</td></tr>; })}
+              {group.sales.length === 0 && <tr><td colSpan="5" className="empty-cell">Nenhuma venda deste vendedor no periodo.</td></tr>}
+            </tbody></table></div>}
+          </div>; })}
+          {sellerSaleGroups.length === 0 && <div className="empty-cell">Nenhuma venda no periodo selecionado.</div>}
+        </div>
+      </div>
+      <section className="commission-print-report" aria-hidden="true">
+        <header>
+          {companySettings?.logoData && <img src={companySettings.logoData} alt="" />}
+          <div><h1>Relatorio de comissoes</h1><strong>{companySettings?.nomeFantasia || "Loja de Celular"}</strong><p>Periodo: {startDate ? new Date(`${startDate}T12:00:00`).toLocaleDateString("pt-BR") : "inicio"} a {endDate ? new Date(`${endDate}T12:00:00`).toLocaleDateString("pt-BR") : "hoje"}</p></div>
+        </header>
+        <div className="commission-print-totals"><div><span>Vendas</span><strong>{totals.sales}</strong></div><div><span>Base comissionavel</span><strong>{formatBRL(totals.base)}</strong></div><div><span>Total de comissoes</span><strong>{formatBRL(totals.commission)}</strong></div></div>
+        {sellerSaleGroups.map(group => <section className="commission-print-seller" key={group.user.id}>
+          <h2><span>{group.user.full_name || group.user.email}</span><small>{group.user.email} · {group.rate.toFixed(2)}%</small></h2>
+          <table><thead><tr><th>Data</th><th>Cliente</th><th>Base</th><th>Comissao</th></tr></thead><tbody>{group.sales.map(sale => { const base = commissionableSaleTotal(sale); return <tr key={sale.id}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{formatBRL(base)}</td><td>{formatBRL(base * group.rate / 100)}</td></tr>; })}</tbody><tfoot><tr><td colSpan="2">Total do vendedor</td><td>{formatBRL(group.base)}</td><td>{formatBRL(group.commission)}</td></tr></tfoot></table>
+        </section>)}
+        <footer>Gerado em {new Date().toLocaleString("pt-BR")}</footer>
+      </section>
+      {showRatesModal && <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) setShowRatesModal(false); }}>
+        <div className="modal commission-sellers-modal" role="dialog" aria-modal="true" aria-labelledby="commission-sellers-title">
+          <div className="product-details-head"><div><h3 id="commission-sellers-title"><i className="ti ti-percentage" aria-hidden="true"></i>Percentuais dos vendedores</h3><p>{filteredSellerRows.length} {filteredSellerRows.length === 1 ? "vendedor encontrado" : "vendedores encontrados"}</p></div><button className="icon-btn" type="button" onClick={() => setShowRatesModal(false)} aria-label="Fechar" title="Fechar"><X size={20} aria-hidden="true" /></button></div>
+          <div className="search commission-seller-search"><i className="ti ti-search" aria-hidden="true"></i><input type="text" value={sellerQuery} onChange={event => setSellerQuery(event.target.value)} placeholder="Pesquisar por nome ou e-mail..." autoFocus /></div>
+          <div className="commission-table-wrap"><table className="stock commission-table"><thead><tr><th>Vendedor</th><th>Vendas</th><th>Base</th><th>Percentual</th><th>Comissao</th></tr></thead><tbody>
+            {visibleSellerRows.map(row => <tr key={row.user.id}><td className="pname">{row.user.full_name || row.user.email}<small>{row.user.email}</small></td><td>{row.salesCount}</td><td>{formatBRL(row.base)}</td><td><div className="commission-rate"><input type="number" min="0" max="100" step="0.01" value={draftRates[row.user.id] ?? draftDefaultRate} onChange={event => setDraftRates(previous => ({...previous, [row.user.id]: event.target.value}))} /><span>%</span></div></td><td className="commission-value">{formatBRL(row.commission)}</td></tr>)}
+            {visibleSellerRows.length === 0 && <tr><td colSpan="5" className="empty-cell">Nenhum vendedor encontrado.</td></tr>}
+          </tbody></table></div>
+          <div className="list-pagination"><button type="button" className="btn sm" disabled={sellerCurrentPage === 1} onClick={() => setSellerPage(page => Math.max(1, page - 1))}><i className="ti ti-chevron-left" aria-hidden="true"></i>Anterior</button><span>Pagina {sellerCurrentPage} de {sellerTotalPages}</span><button type="button" className="btn sm" disabled={sellerCurrentPage === sellerTotalPages} onClick={() => setSellerPage(page => Math.min(sellerTotalPages, page + 1))}>Proxima<i className="ti ti-chevron-right" aria-hidden="true"></i></button></div>
+          <div className="commission-actions"><button className="btn ghost" type="button" onClick={() => setShowRatesModal(false)}>Cancelar</button><button className="btn primary" type="button" onClick={saveRates} disabled={saving}>{saving ? "Salvando..." : "Salvar percentuais"}</button></div>
+        </div>
+      </div>}
+      {estornoTarget && <EstornoVendaModal sale={estornoTarget} onConfirm={handleCommissionSaleVoid} onCancel={() => setEstornoTarget(null)} />}
+      {selectedSale && <SaleDetailsModal sale={selectedSale} tradeIns={products.filter(product => product.vendaOrigemId === selectedSale.id)} usersById={Object.fromEntries(users.map(user => [user.id, user]))} clientDocument={clientes.find(client => client.id === selectedSale.cliente?.id)?.documento || ""} companySettings={companySettings} onClose={() => setSelectedSale(null)} onEstornarVenda={() => { setEstornoTarget(selectedSale); setSelectedSale(null); }} />}
+    </div>
+  );
+}
+
+function LoginScreen({onAuthenticated, recoveryMode = false, onRecoveryComplete, onCancelRecovery, initialMessage = ""}) {
   const [mode, setMode] = useState(() => {
-    if (typeof window === "undefined") return "login";
+    if (recoveryMode) return "reset";
+    if (typeof window === "undefined") return "login";
     const preferred = window.localStorage.getItem("estoque_auth_mode");
     window.localStorage.removeItem("estoque_auth_mode");
     return preferred === "register" ? "register" : "login";
   });
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [fullName, setFullName] = useState("");
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(initialMessage);
   const [error, setError] = useState("");
   const [allowRegistration, setAllowRegistration] = useState(false);
   const [checkingRegistration, setCheckingRegistration] = useState(true);
@@ -4478,6 +4738,10 @@ function LoginScreen({onAuthenticated}) {
       return {nomeFantasia: "", logoData: ""};
     }
   });
+
+  useEffect(() => {
+    if (recoveryMode) setMode("reset");
+  }, [recoveryMode]);
 
   useEffect(() => {
     if (!SUPABASE_READY) return undefined;
@@ -4504,7 +4768,7 @@ function LoginScreen({onAuthenticated}) {
         if (active) {
           setAllowRegistration(false);
           setCheckingRegistration(false);
-          setMode("login");
+          setMode(current => current === "register" ? "login" : current);
         }
         return;
       }
@@ -4514,11 +4778,11 @@ function LoginScreen({onAuthenticated}) {
         if (!active) return;
         const canRegister = Boolean(payload.allowRegistration);
         setAllowRegistration(canRegister);
-        if (!canRegister) setMode("login");
+        if (!canRegister) setMode(current => current === "register" ? "login" : current);
       } catch (_err) {
         if (active) {
           setAllowRegistration(false);
-          setMode("login");
+          setMode(current => current === "register" ? "login" : current);
         }
       } finally {
         if (active) setCheckingRegistration(false);
@@ -4529,6 +4793,8 @@ function LoginScreen({onAuthenticated}) {
   }, []);
 
   const isRegister = mode === "register" && allowRegistration;
+  const isForgot = mode === "forgot";
+  const isReset = recoveryMode || mode === "reset";
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -4543,18 +4809,36 @@ function LoginScreen({onAuthenticated}) {
       setError("Cadastro pela tela de login está disponível apenas para o primeiro usuário.");
       return;
     }
-    if (!email.trim() || !password) {
+    if (isForgot && !email.trim()) {
+      setError("Informe seu email.");
+      return;
+    }
+    if (isReset && (!password || !passwordConfirmation)) {
+      setError("Informe e confirme a nova senha.");
+      return;
+    }
+    if (!isForgot && !isReset && (!email.trim() || !password)) {
       setError("Informe email e senha.");
       return;
     }
-    if (isRegister && password.length < 6) {
+    if ((isRegister || isReset) && password.length < 6) {
       setError("A senha precisa ter pelo menos 6 caracteres.");
+      return;
+    }
+    if (isReset && password !== passwordConfirmation) {
+      setError("As senhas informadas nao coincidem.");
       return;
     }
 
     setLoading(true);
     try {
-      if (isRegister) {
+      if (isForgot) {
+        await requestPasswordReset(email.trim());
+        setMessage("Enviamos um link para redefinir sua senha. Verifique a caixa de entrada e o spam.");
+      } else if (isReset) {
+        await updateCurrentUserPassword(password);
+        await onRecoveryComplete();
+      } else if (isRegister) {
         const result = await signUpUser({email: email.trim(), password, fullName: fullName.trim()});
         if (result.session) onAuthenticated(result.session);
         else {
@@ -4584,30 +4868,60 @@ function LoginScreen({onAuthenticated}) {
           </div>
         </div>
 
+        {isForgot && <p className="auth-instructions">Informe seu email para receber o link de redefinicao de senha.</p>}
+        {isReset && <p className="auth-instructions">Defina uma nova senha para sua conta.</p>}
+
         {isRegister && (
           <Field label="Nome">
             <input type="text" value={fullName} onChange={e => setFullName(e.target.value)} placeholder="Nome do usuário" />
           </Field>
         )}
-        <Field label="Email" required>
+        {!isReset && <Field label="Email" required>
           <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="usuario@empresa.com" autoComplete="email" />
-        </Field>
-        <Field label="Senha" required>
+        </Field>}
+        {!isForgot && <Field label={isReset ? "Nova senha" : "Senha"} required>
           <div className="password-row auth-password-row">
             <input type={showPassword ? "text" : "password"} value={password} onChange={e => setPassword(e.target.value)} placeholder="Mínimo 6 caracteres" autoComplete={isRegister ? "new-password" : "current-password"} />
             <button className="icon-btn password-action" type="button" onClick={() => setShowPassword(value => !value)} title={showPassword ? "Ocultar senha" : "Mostrar senha"} aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}>
               {showPassword ? <EyeOff size={18} aria-hidden="true" /> : <Eye size={18} aria-hidden="true" />}
             </button>
           </div>
-        </Field>
+        </Field>}
+        {isReset && <Field label="Confirmar nova senha" required>
+          <div className="password-row auth-password-row">
+            <input type={showPassword ? "text" : "password"} value={passwordConfirmation} onChange={e => setPasswordConfirmation(e.target.value)} placeholder="Repita a nova senha" autoComplete="new-password" />
+            <button className="icon-btn password-action" type="button" onClick={() => setShowPassword(value => !value)} title={showPassword ? "Ocultar senha" : "Mostrar senha"} aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}>
+              {showPassword ? <EyeOff size={18} aria-hidden="true" /> : <Eye size={18} aria-hidden="true" />}
+            </button>
+          </div>
+        </Field>}
 
         {error && <div className="auth-alert danger">{error}</div>}
         {message && <div className="auth-alert ok">{message}</div>}
 
-        <button className="btn primary auth-submit" type="submit" disabled={loading}>
+        {isForgot || isReset ? (
+          <button className="btn primary auth-submit" type="submit" disabled={loading}>
+            {loading ? "Aguarde..." : isReset ? "Salvar nova senha" : "Enviar link de recuperacao"}
+          </button>
+        ) : <button className="btn primary auth-submit" type="submit" disabled={loading}>
           {loading ? "Aguarde..." : (isRegister ? "Criar usuário" : "Entrar")}
-        </button>
-        {(isRegister || (!checkingRegistration && allowRegistration)) && (
+        </button>}
+        {!isRegister && !isForgot && !isReset && (
+          <button className="auth-mode-switch" type="button" onClick={() => { setMode("forgot"); setError(""); setMessage(""); }}>
+            Esqueceu a senha?
+          </button>
+        )}
+        {isForgot && (
+          <button className="auth-mode-switch" type="button" onClick={() => { setMode("login"); setError(""); setMessage(""); }}>
+            Voltar para entrar
+          </button>
+        )}
+        {isReset && (
+          <button className="auth-mode-switch" type="button" onClick={onCancelRecovery} disabled={loading}>
+            Voltar para o login
+          </button>
+        )}
+        {!isForgot && !isReset && (isRegister || (!checkingRegistration && allowRegistration)) && (
           <button
             className="auth-mode-switch"
             type="button"
@@ -4682,6 +4996,7 @@ function UserManagement({currentProfile}) {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState(null);
+  const [resettingPasswordId, setResettingPasswordId] = useState(null);
   const [creating, setCreating] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState("");
@@ -4716,6 +5031,21 @@ function UserManagement({currentProfile}) {
     if (updateError) setError(updateError.message);
     await loadUsers();
     setSavingId(null);
+  };
+
+  const sendPasswordReset = async (user) => {
+    if (!window.confirm(`Enviar um link de alteracao de senha para ${user.email}?`)) return;
+    setResettingPasswordId(user.id);
+    setError("");
+    setSuccess("");
+    try {
+      await requestPasswordReset(user.email);
+      setSuccess(`Link de alteracao de senha enviado para ${user.email}.`);
+    } catch (err) {
+      setError(err.message || "Nao foi possivel enviar o link de alteracao de senha.");
+    } finally {
+      setResettingPasswordId(null);
+    }
   };
 
   const openCreate = () => {
@@ -4791,6 +5121,11 @@ function UserManagement({currentProfile}) {
                   <strong>{user.full_name || user.email}</strong>
                   <span>{user.email}</span>
                 </div>
+                <div className="user-actions">
+                  <button className="btn ghost sm user-password-reset" type="button" onClick={() => sendPasswordReset(user)} disabled={resettingPasswordId === user.id}>
+                    <i className="ti ti-key" aria-hidden="true"></i>
+                    {resettingPasswordId === user.id ? "Enviando..." : "Alterar senha"}
+                  </button>
                 {user.id === currentProfile.id ? (
                   <span className="role-badge">{ROLE_LABELS[normalizeRole(user.role)]}</span>
                 ) : (
@@ -4804,6 +5139,7 @@ function UserManagement({currentProfile}) {
                     {userRoleOptionsFor(currentProfile).map(role => <option key={role} value={role}>{ROLE_LABELS[role]}</option>)}
                   </select>
                 )}
+                </div>
               </div>
             ))}
           </div>
@@ -4839,6 +5175,8 @@ function EstoqueApp() {
   const [protecaoPlanos, setProtecaoPlanos] = useState(PROTECAO_PADRAO);
   const [bandeiras, setBandeiras] = useState(BANDEIRAS_PADRAO);
   const [taxasCartao, setTaxasCartao] = useState({});
+  const [commissionRates, setCommissionRates] = useState({});
+  const [defaultCommissionRate, setDefaultCommissionRate] = useState(DEFAULT_COMMISSION_RATE);
   const [companySettings, setCompanySettings] = useState({nomeFantasia: "", razaoSocial: "", documento: "", telefone: "", email: "", endereco: ""});
   const [userProfiles, setUserProfiles] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -4846,11 +5184,26 @@ function EstoqueApp() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [authError, setAuthError] = useState("");
+  const [recoveringPassword, setRecoveringPassword] = useState(false);
+  const [passwordResetMessage] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("password_reset") === "success"
+      ? "Senha alterada com sucesso. Entre usando a nova senha."
+      : "";
+  });
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("password_reset") !== "success") return;
+    url.searchParams.delete("password_reset");
+    window.history.replaceState({}, document.title, `${url.pathname}${url.search}`);
+  }, []);
 
   const load = async () => {
-    const [p, s, c, fabs, v, cli, planos, band, taxas, users, company] = await Promise.all([
+    const [p, s, c, fabs, v, cli, planos, band, taxas, users, company, commissions] = await Promise.all([
       db.listProducts(), db.listSuppliers(), db.listAcessorioCategorias(), db.listFabricantes(), db.listSales(),
       db.listClientes(), db.listProtecaoPlanos(), db.listBandeiras(), db.getTaxasCartao(), db.listUserProfiles(), db.getCompanySettings(),
+      normalizeRole(activeProfile?.role) === "admin" ? db.listCommissionRates() : Promise.resolve({rates: {}, defaultRate: DEFAULT_COMMISSION_RATE}),
     ]);
     setProducts(p);
     setSuppliers(s);
@@ -4863,6 +5216,8 @@ function EstoqueApp() {
     setTaxasCartao(taxas);
     setUserProfiles(users);
     setCompanySettings(company);
+    setCommissionRates(commissions.rates || {});
+    setDefaultCommissionRate(commissions.defaultRate ?? DEFAULT_COMMISSION_RATE);
     try {
       window.localStorage.setItem(COMPANY_BRAND_CACHE_KEY, JSON.stringify({nomeFantasia: company.nomeFantasia || "", logoData: company.logoData || ""}));
     } catch (_error) {}
@@ -4871,6 +5226,14 @@ function EstoqueApp() {
 
   const enterSupabaseMode = async () => {
     const currentSession = await getCurrentSession();
+    const recoveryLink = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("type") === "recovery";
+    if (recoveryLink && currentSession?.user) {
+      setRecoveringPassword(true);
+      setSession(currentSession);
+      setProfile(null);
+      setLoading(false);
+      return;
+    }
     if (currentSession?.user && isSessionExpired(currentSession.user.id)) {
       await signOutUser();
       clearSessionExpiration();
@@ -4947,6 +5310,14 @@ function EstoqueApp() {
       if (!mounted || !(await canUseSupabaseNow())) return;
       try {
         setAuthError("");
+        if (event === "PASSWORD_RECOVERY") {
+          setRecoveringPassword(true);
+          setSession(nextSession);
+          setProfile(null);
+          setLoading(false);
+          setAuthLoading(false);
+          return;
+        }
         if (event === "SIGNED_OUT") clearSessionExpiration();
         if (nextSession?.user && isSessionExpired(nextSession.user.id)) {
           await signOutUser();
@@ -5073,7 +5444,7 @@ function EstoqueApp() {
       tradeIns: [],
       cliente: {id: customer.id || null, nome: customer.nome, contato: customer.contato || "", documento: customer.documento || ""},
       pagamentos: [{forma: payment.forma, valorBase: Number(price), taxaPct: feeRate, valorTaxa: feeValue, valor: Number(price) + feeValue, bandeira: payment.bandeira || null, parcelas: payment.parcelas || null}],
-      total: Number(price),
+      total: Number(price) + feeValue,
     });
     await handleSaleComplete(updatedProducts);
     toast.success("Venda direta efetuada com sucesso.");
@@ -5164,6 +5535,13 @@ function EstoqueApp() {
     setTaxasCartao(saved);
   };
 
+  const handleSaveCommissionRates = async (values, defaultRate) => {
+    const saved = await db.setCommissionRates(values, defaultRate);
+    setCommissionRates(saved.rates);
+    setDefaultCommissionRate(saved.defaultRate);
+    return saved;
+  };
+
   const handleAddBandeira = async (name) => {
     const list = await db.addBandeira(name);
     setBandeiras(list);
@@ -5190,6 +5568,27 @@ function EstoqueApp() {
       setAuthError(err.message || "Erro ao carregar usuário.");
     } finally {
       setAuthLoading(false);
+    }
+  };
+
+  const handlePasswordRecoveryComplete = async () => {
+    try {
+      await signOutUser();
+    } finally {
+      clearSessionExpiration();
+      const loginUrl = new URL(window.location.href);
+      loginUrl.hash = "";
+      loginUrl.searchParams.set("password_reset", "success");
+      window.location.replace(loginUrl.toString());
+    }
+  };
+
+  const handleCancelPasswordRecovery = async () => {
+    try {
+      await signOutUser();
+    } finally {
+      clearSessionExpiration();
+      window.location.replace(window.location.pathname);
     }
   };
 
@@ -5263,8 +5662,12 @@ function EstoqueApp() {
     );
   }
 
+  if (recoveringPassword) {
+    return <LoginScreen recoveryMode onAuthenticated={handleAuthenticated} onRecoveryComplete={handlePasswordRecoveryComplete} onCancelRecovery={handleCancelPasswordRecovery} />;
+  }
+
   if (!session) {
-    return <LoginScreen onAuthenticated={handleAuthenticated} />;
+    return <LoginScreen onAuthenticated={handleAuthenticated} initialMessage={passwordResetMessage} />;
   }
 
   return (
@@ -5305,6 +5708,11 @@ function EstoqueApp() {
             <i className="ti ti-receipt" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Vendas<span className="n">{sales.length}</span>
           </button>
         )}
+        {allowedTabs.includes("comissoes") && (
+          <button className={tab === "comissoes" ? "active" : ""} onClick={() => setTab("comissoes")}>
+            <i className="ti ti-percentage" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Comissoes
+          </button>
+        )}
         {usingSupabase && allowedTabs.includes("usuarios") && (
           <button className={tab === "usuarios" ? "active" : ""} onClick={() => setTab("usuarios")}>
             <i className="ti ti-users" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Usuários
@@ -5337,6 +5745,7 @@ function EstoqueApp() {
             clientes={clientes.filter(client => client.cliente && client.ativo !== false)}
             bandeiras={bandeiras}
             taxasCartao={taxasCartao}
+            defaultCommissionRate={defaultCommissionRate}
             onAddCliente={handleAddCliente}
             onDirectSale={handleDirectSale}
             onDelete={handleDelete}
@@ -5372,6 +5781,8 @@ function EstoqueApp() {
             reload={load}
             onEstornarVenda={handleEstornarVenda}
           /></VendasPage>
+      ) : tab === "comissoes" ? (
+        <CommissionsPanel sales={sales} users={userProfiles} products={products} clientes={clientes} companySettings={companySettings} rates={commissionRates} defaultRate={defaultCommissionRate} onSaveRates={handleSaveCommissionRates} onEstornarVenda={handleEstornarVenda} />
       ) : tab === "usuarios" ? (
         <UsuariosPage><UserManagement currentProfile={profile} /></UsuariosPage>
       ) : tab === "fabricantes" ? (

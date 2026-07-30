@@ -144,6 +144,7 @@ create table if not exists public.configuracoes_empresa (
   email text,
   endereco text,
   logo_data text,
+  percentual_comissao_padrao numeric(7,4) not null default 5 check (percentual_comissao_padrao between 0 and 100),
   updated_at timestamptz not null default now()
 );
 
@@ -157,6 +158,12 @@ create table if not exists public.user_profiles (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.comissoes_vendedores (
+  user_id uuid primary key references public.user_profiles(id) on delete cascade,
+  percentual numeric(7,4) not null default 5 check (percentual between 0 and 100),
+  updated_at timestamptz not null default now()
+);
+
 -- ------------------------------------------------------------
 -- ATUALIZAÇÃO DE ESTRUTURAS ANTIGAS
 -- ------------------------------------------------------------
@@ -167,9 +174,23 @@ alter table public.products add column if not exists descricao text;
 alter table public.products add column if not exists status_aprovacao text not null default 'aprovado';
 alter table public.products add column if not exists venda_origem_id uuid references public.sales(id) on delete set null;
 alter table public.configuracoes_empresa add column if not exists logo_data text;
+alter table public.configuracoes_empresa add column if not exists percentual_comissao_padrao numeric(7,4) not null default 5;
+alter table public.comissoes_vendedores alter column percentual set default 5;
 alter table public.user_profiles add column if not exists slug text;
 alter table public.sale_items add column if not exists created_at timestamptz not null default now();
 alter table public.sale_payments add column if not exists created_at timestamptz not null default now();
+
+-- Corrige também vendas antigas: o total final é a soma efetivamente paga,
+-- incluindo os juros de cartão já armazenados em sale_payments.valor.
+update public.sales as sale
+set total = payments.total_pago
+from (
+  select sale_id, round(sum(valor)::numeric, 2) as total_pago
+  from public.sale_payments
+  group by sale_id
+) as payments
+where sale.id = payments.sale_id
+  and abs(sale.total - payments.total_pago) > 0.009;
 alter table public.taxas_cartao add column if not exists created_at timestamptz not null default now();
 
 update public.products
@@ -184,7 +205,7 @@ begin
   foreach tabela in array array[
     'products','suppliers','product_photos','clientes','fabricantes','sales',
     'sale_items','sale_payments','protecao_planos','bandeiras_cartao',
-    'taxas_cartao','configuracoes_empresa'
+    'taxas_cartao','configuracoes_empresa','comissoes_vendedores'
   ] loop
     execute format('alter table public.%I add column if not exists ativo boolean not null default true', tabela);
     execute format('alter table public.%I add column if not exists inativado_em timestamptz', tabela);
@@ -192,6 +213,57 @@ begin
     execute format('alter table public.%I add column if not exists atualizado_por uuid references auth.users(id)', tabela);
   end loop;
 end $sql$;
+
+-- Mantem o cadastro unificado de pessoas sincronizado com a tabela usada
+-- pela chave estrangeira products.fornecedor.
+create or replace function public.fn_sincroniza_fornecedor() returns trigger
+language plpgsql security definer set search_path = public
+as $fn$
+begin
+  if new.fornecedor and new.ativo then
+    insert into public.suppliers(name, ativo, inativado_em)
+    values (trim(new.nome), true, null)
+    on conflict (name) do update
+      set ativo = true, inativado_em = null;
+  end if;
+
+  if tg_op = 'UPDATE'
+     and old.fornecedor
+     and (not new.fornecedor or not new.ativo or old.nome is distinct from new.nome)
+     and not exists (
+       select 1
+       from public.clientes c
+       where c.id <> new.id
+         and c.fornecedor
+         and c.ativo
+         and c.nome = old.nome
+     ) then
+    update public.suppliers
+       set ativo = false, inativado_em = now()
+     where name = old.nome;
+  end if;
+
+  return new;
+end $fn$;
+
+drop trigger if exists trg_sincroniza_fornecedor on public.clientes;
+create trigger trg_sincroniza_fornecedor
+after insert or update of nome, fornecedor, ativo on public.clientes
+for each row execute function public.fn_sincroniza_fornecedor();
+
+-- Repara fornecedores antigos criados apenas em clientes e qualquer nome ja
+-- usado por produtos antes da instalacao desta versao do banco.
+insert into public.suppliers(name, ativo, inativado_em)
+select distinct trim(nome), true, null::timestamptz
+from public.clientes
+where fornecedor and ativo and nullif(trim(nome), '') is not null
+on conflict (name) do update set ativo = true, inativado_em = null;
+
+insert into public.suppliers(name, ativo, inativado_em)
+select distinct trim(fornecedor), true, null::timestamptz
+from public.products
+where nullif(trim(fornecedor), '') is not null
+on conflict (name) do update set ativo = true, inativado_em = null;
 
 -- ------------------------------------------------------------
 -- REGRAS DE INTEGRIDADE
@@ -441,7 +513,7 @@ begin
   foreach tabela in array array[
     'products','suppliers','product_photos','clientes','fabricantes','sales',
     'sale_items','sale_payments','protecao_planos','bandeiras_cartao',
-    'taxas_cartao','configuracoes_empresa'
+    'taxas_cartao','configuracoes_empresa','comissoes_vendedores'
   ] loop
     execute format('drop trigger if exists trg_auditoria_usuario on public.%I', tabela);
     execute format('create trigger trg_auditoria_usuario before insert or update on public.%I for each row execute function public.fn_auditoria_usuario()', tabela);
@@ -458,7 +530,7 @@ begin
   foreach tabela in array array[
     'products','suppliers','product_photos','clientes','fabricantes','sales',
     'sale_items','sale_payments','protecao_planos','bandeiras_cartao',
-    'taxas_cartao','configuracoes_empresa'
+    'taxas_cartao','configuracoes_empresa','comissoes_vendedores'
   ] loop
     execute format('alter table public.%I enable row level security', tabela);
     execute format('drop policy if exists authenticated_access on public.%I', tabela);
@@ -466,11 +538,27 @@ begin
     execute format('drop policy if exists authenticated_insert on public.%I', tabela);
     execute format('drop policy if exists authenticated_update on public.%I', tabela);
     execute format('drop policy if exists authenticated_delete on public.%I', tabela);
-    execute format('create policy authenticated_read on public.%I for select to authenticated using (ativo = true or public.fn_is_admin())', tabela);
+    -- A aplicacao filtra os inativos nas consultas. Permitir a leitura da linha
+    -- inativa e necessario para que ON CONFLICT/UPSERT consiga reativa-la.
+    execute format('create policy authenticated_read on public.%I for select to authenticated using (true)', tabela);
     execute format('create policy authenticated_insert on public.%I for insert to authenticated with check (true)', tabela);
     execute format('create policy authenticated_update on public.%I for update to authenticated using (true) with check (true)', tabela);
   end loop;
 end $sql$;
+
+-- Percentuais de comissao sao confidenciais e administrados somente por admin.
+drop policy if exists authenticated_read on public.comissoes_vendedores;
+drop policy if exists authenticated_insert on public.comissoes_vendedores;
+drop policy if exists authenticated_update on public.comissoes_vendedores;
+drop policy if exists admins_read_commissions on public.comissoes_vendedores;
+drop policy if exists admins_insert_commissions on public.comissoes_vendedores;
+drop policy if exists admins_update_commissions on public.comissoes_vendedores;
+create policy admins_read_commissions on public.comissoes_vendedores
+for select to authenticated using (public.fn_is_admin());
+create policy admins_insert_commissions on public.comissoes_vendedores
+for insert to authenticated with check (public.fn_is_admin());
+create policy admins_update_commissions on public.comissoes_vendedores
+for update to authenticated using (public.fn_is_admin()) with check (public.fn_is_admin());
 
 -- A identidade visual precisa ser lida antes do login.
 drop policy if exists public_company_branding_read on public.configuracoes_empresa;
