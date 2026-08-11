@@ -4,13 +4,14 @@ import {useMemo, useState} from "react";
 import {Plus} from "lucide-react";
 import PessoaModal from "./PessoaModal";
 
-export const pessoasMenu = {key: "clientes", label: "Clientes e fornecedores", icon: "ti-address-book", count: "people"};
+export const pessoasMenu = {key: "clientes", label: "Pessoas", icon: "ti-address-book", count: "people"};
 
 const FILTERS = [
   {key: "todos", label: "Todos"},
-  {key: "cliente", label: "Somente clientes"},
-  {key: "fornecedor", label: "Somente fornecedores"},
-  {key: "ambos", label: "Cliente + fornecedor"},
+  {key: "cliente", label: "Clientes"},
+  {key: "fornecedor", label: "Fornecedores"},
+  {key: "trading", label: "Tradings"},
+  {key: "multiplos", label: "Mais de um tipo"},
 ];
 
 function normalizeText(value) {
@@ -26,13 +27,14 @@ export default function PessoasPage({pessoas, onSave}) {
   const [roleFilter, setRoleFilter] = useState("todos");
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
-  const title = "Clientes e fornecedores";
+  const title = "Clientes, fornecedores e Tradings";
 
   const counts = useMemo(() => ({
     todos: pessoas.length,
-    cliente: pessoas.filter(person => person.cliente && !person.fornecedor).length,
-    fornecedor: pessoas.filter(person => person.fornecedor && !person.cliente).length,
-    ambos: pessoas.filter(person => person.cliente && person.fornecedor).length,
+    cliente: pessoas.filter(person => person.cliente).length,
+    fornecedor: pessoas.filter(person => person.fornecedor).length,
+    trading: pessoas.filter(person => person.trading).length,
+    multiplos: pessoas.filter(person => [person.cliente, person.fornecedor, person.trading].filter(Boolean).length > 1).length,
   }), [pessoas]);
 
   const filtered = useMemo(() => {
@@ -40,9 +42,10 @@ export default function PessoasPage({pessoas, onSave}) {
     const documentQuery = onlyDigits(query);
     return pessoas
       .filter(person => {
-        if (roleFilter === "cliente") return person.cliente && !person.fornecedor;
-        if (roleFilter === "fornecedor") return person.fornecedor && !person.cliente;
-        if (roleFilter === "ambos") return person.cliente && person.fornecedor;
+        if (roleFilter === "cliente") return person.cliente;
+        if (roleFilter === "fornecedor") return person.fornecedor;
+        if (roleFilter === "trading") return person.trading;
+        if (roleFilter === "multiplos") return [person.cliente, person.fornecedor, person.trading].filter(Boolean).length > 1;
         return true;
       })
       .filter(person => !textQuery
@@ -90,7 +93,7 @@ export default function PessoasPage({pessoas, onSave}) {
             <button className="pessoa-card" type="button" key={person.id} onClick={() => setEditing(person)}>
               <div className="pessoa-avatar">{person.nome.slice(0, 1).toUpperCase()}</div>
               <div className="pessoa-main"><strong>{person.nome}</strong><span>{[person.contato, person.email, person.documento].filter(Boolean).join(" · ") || "Sem contato informado"}</span></div>
-              <div className="pessoa-badges">{person.cliente && <span>Cliente</span>}{person.fornecedor && <span>Fornecedor</span>}{person.ativo === false && <span>Inativo</span>}</div>
+              <div className="pessoa-badges">{person.cliente && <span>Cliente</span>}{person.fornecedor && <span>Fornecedor</span>}{person.trading && <span>Trading</span>}{person.ativo === false && <span>Inativo</span>}</div>
               <i className="ti ti-pencil" aria-hidden="true"></i>
             </button>
           ))}

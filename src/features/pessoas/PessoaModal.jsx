@@ -38,6 +38,7 @@ export default function PessoaModal({pessoa, defaultRole = "cliente", title, onS
     observacoes: pessoa?.observacoes || "",
     cliente: pessoa ? pessoa.cliente !== false : defaultRole === "cliente",
     fornecedor: pessoa ? Boolean(pessoa.fornecedor) : defaultRole === "fornecedor",
+    trading: pessoa ? Boolean(pessoa.trading) : defaultRole === "trading",
   }));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -52,7 +53,7 @@ export default function PessoaModal({pessoa, defaultRole = "cliente", title, onS
     if (form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) return setError("Informe um e-mail válido, por exemplo: nome@empresa.com.br.");
     if (documentDigits && ![11, 14].includes(documentDigits.length)) return setError("Informe um CPF com 11 dígitos ou CNPJ com 14 dígitos.");
     if (!form.nome.trim()) return setError("Informe o nome ou a razão social.");
-    if (!form.cliente && !form.fornecedor) return setError("Marque Cliente, Fornecedor ou os dois.");
+    if (!form.cliente && !form.fornecedor && !form.trading) return setError("Marque Cliente, Fornecedor ou Trading.");
     setSaving(true);
     setError("");
     try {
@@ -69,7 +70,7 @@ export default function PessoaModal({pessoa, defaultRole = "cliente", title, onS
     <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget && !saving) onCancel(); }}>
       <form className="modal pessoa-modal" onSubmit={submit}>
         <h3><i className="ti ti-address-book" aria-hidden="true"></i>{title || (pessoa ? "Editar cadastro" : "Novo cadastro")}</h3>
-        <p>Um mesmo cadastro pode ser cliente, fornecedor ou exercer os dois papéis.</p>
+        <p>Um mesmo cadastro pode ser Cliente, Fornecedor, Trading ou exercer mais de um papel.</p>
         <div className="pessoa-form-grid">
           <Field label="Nome / razão social" required span2><input autoFocus value={form.nome} placeholder="Ex.: João da Silva ou Empresa LTDA" onChange={event => set("nome", event.target.value)} /></Field>
           <Field label="Telefone / contato"><input type="tel" inputMode="numeric" maxLength={15} value={formatPhone(form.contato)} placeholder="Ex.: (85) 99999-9999" onChange={event => set("contato", formatPhone(event.target.value))} /></Field>
@@ -80,6 +81,7 @@ export default function PessoaModal({pessoa, defaultRole = "cliente", title, onS
         <div className="pessoa-role-picker">
           <label><input type="checkbox" checked={form.cliente} onChange={event => set("cliente", event.target.checked)} /> Cliente</label>
           <label><input type="checkbox" checked={form.fornecedor} onChange={event => set("fornecedor", event.target.checked)} /> Fornecedor</label>
+          <label><input type="checkbox" checked={form.trading} onChange={event => set("trading", event.target.checked)} /> Trading</label>
         </div>
         {error && <div className="err pessoa-error">{error}</div>}
         <div className="row">

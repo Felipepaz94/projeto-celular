@@ -6,7 +6,7 @@ import {ChevronDown, ChevronUp, Menu, X} from "lucide-react";
 const NAV_ITEMS = [
   {key: "cadastro", label: "Produto", icon: "ti-plus"},
   {key: "estoque", label: "Estoque", icon: "ti-list", countKey: "products"},
-  {key: "clientes", label: "Clientes e fornecedores", icon: "ti-address-book", countKey: "clientes"},
+  {key: "clientes", label: "Pessoas", icon: "ti-address-book", countKey: "clientes"},
   {key: "pdv", label: "PDV", icon: "ti-shopping-cart"},
   {key: "historico", label: "Vendas", icon: "ti-receipt", countKey: "sales"},
   {key: "comissoes", label: "Comissoes", icon: "ti-percentage"},

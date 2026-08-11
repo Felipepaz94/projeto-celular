@@ -2,8 +2,10 @@
 
 import React, {useState, useEffect, useMemo, useRef} from "react";
 import {createClient} from "@supabase/supabase-js";
-import * as XLSX from "xlsx";
-import {toast} from "sonner";
+import * as XLSX from "xlsx";
+
+import {toast} from "sonner";
+
 import {BadgeDollarSign, Building2, CalendarDays, Check, Copy, CreditCard, Eye, EyeOff, FileDown, Hash, Pencil, Percent, Plus, Printer, RefreshCw, RotateCcw, ShieldCheck, ShoppingBag, Trash2, UserRound, X} from "lucide-react";
 import {ChipPicker, Field, Toggle2} from "./components/FormControls";
 import SupplierCombo from "./components/SupplierCombo";
@@ -32,15 +34,22 @@ import ResponsiveNavigation from "@/features/navigation/ResponsiveNavigation";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
-const SUPABASE_READY = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+const SUPABASE_READY = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+
 const PRODUCT_PHOTO_UPLOAD_URL = "/api/uploads/product-photos";
 const BOOTSTRAP_STATUS_URL = "/api/auth/bootstrap-status";
-const supabaseClient = SUPABASE_READY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: {
-    detectSessionInUrl: true,
-    persistSession: true,
-    autoRefreshToken: true,
-  },
+const supabaseClient = SUPABASE_READY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+
+  auth: {
+
+    detectSessionInUrl: true,
+
+    persistSession: true,
+
+    autoRefreshToken: true,
+
+  },
+
 }) : null;
 
 const LOCAL_SESSION = {user: {id: "local-offline", email: "modo.local@offline"}};
@@ -134,10 +143,9 @@ const localDb = {
   },
   async listSuppliers() {
     const clientes = await localDb.listClientes();
-    const raw = localStorage.getItem(SUPPLIERS_KEY);
-    const antigos = raw ? JSON.parse(raw) : [];
-    const unificados = clientes.filter(c => c.fornecedor).map(c => ({id: c.id, name: c.nome}));
-    return [...unificados, ...antigos.filter(s => !unificados.some(u => u.name.toLowerCase() === s.name.toLowerCase()))]
+    return clientes
+      .filter(cliente => cliente.fornecedor && cliente.ativo !== false)
+      .map(cliente => ({id: cliente.id, name: cliente.nome, ativo: true}))
       .sort((a, b) => a.name.localeCompare(b.name));
   },
   async addSupplier(input) {
@@ -177,6 +185,19 @@ const localDb = {
     localStorage.setItem(FABRICANTES_KEY, JSON.stringify(next));
     return next;
   },
+  async listProductTypes() {
+    const saved = JSON.parse(localStorage.getItem(PRODUCT_TYPES_KEY) || "[]");
+    return syncProductTypes(saved);
+  },
+  async addProductType(label) {
+    const clean = String(label || "").trim();
+    const key = productTypeKey(clean);
+    if (!clean || !key) throw new Error("Informe um nome válido para o tipo de produto.");
+    const saved = JSON.parse(localStorage.getItem(PRODUCT_TYPES_KEY) || "[]");
+    if (!saved.some(item => item.key === key) && !KINDS.some(item => item.key === key)) saved.push({key, label: clean, icon: "ti-box", sub: "Serial · sem qtd"});
+    localStorage.setItem(PRODUCT_TYPES_KEY, JSON.stringify(saved));
+    return syncProductTypes(saved);
+  },
   async deleteFabricante(name) {
     const all = await localDb.listFabricantes();
     const next = all.filter(item => item.toLocaleLowerCase("pt-BR") !== name.toLocaleLowerCase("pt-BR"));
@@ -190,7 +211,7 @@ const localDb = {
   // Finaliza uma venda: grava o registro de venda e dá baixa no estoque.
   // cartItems: itens vindos do estoque (dão baixa) — [{ productId, kind, quantidade, vendaUnit, nome, sub }]
   // extras: itens sem baixa de estoque, como Proteção Start ou venda avulsa — [{ kind, quantidade, vendaUnit, nome, sub, tipo }]
-  async finalizeSale({cartItems, extras = [], cliente, pagamentos, total}) {
+  async finalizeSale({cartItems, extras = [], tradeIns = [], cliente, pagamentos, total}) {
     const products = await localDb.listProducts();
     const itensVenda = [];
 
@@ -239,7 +260,7 @@ const localDb = {
         vendaUnit: item.vendaUnit,
         nome: item.nome,
         sub: item.sub,
-        productSnapshot: null,
+        productSnapshot: item.productSnapshot || null,
       });
     }
 
@@ -257,6 +278,10 @@ const localDb = {
     const sales = await localDb.listSales();
     sales.unshift(sale);
     localStorage.setItem(SALES_KEY, JSON.stringify(sales));
+
+    if (tradeIns.length > 0 && cliente?.id) {
+      await localDb.updateCliente(cliente.id, {trading: true});
+    }
 
     return {sale, products};
   },
@@ -319,7 +344,22 @@ const localDb = {
     for (const item of sale.itens.filter(item => item.status === "ativo")) {
       result = await localDb.estornarItemVenda(saleId, item.id, motivo);
     }
-    return result;
+    const estornadoEm = new Date().toISOString();
+    const motivoEstorno = motivo || "Estorno integral da venda";
+    const sales = await localDb.listSales();
+    const saleIndex = sales.findIndex(item => item.id === saleId);
+    sales[saleIndex] = {
+      ...sales[saleIndex],
+      status: "estornada",
+      estornadoPor: "usuario-local",
+      pagamentos: (sales[saleIndex].pagamentos || []).map(payment => ({...payment, status: "estornado", estornadoEm, motivoEstorno, estornadoPor: "usuario-local"})),
+    };
+    localStorage.setItem(SALES_KEY, JSON.stringify(sales));
+    const products = (await localDb.listProducts()).map(product => product.vendaOrigemId === saleId
+      ? {...product, ativo: false, statusAprovacao: "estornado", inativadoEm: estornadoEm, estornadoEm, motivoEstorno, estornadoPor: "usuario-local"}
+      : product);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(products));
+    return {sale: sales[saleIndex], products};
   },
 
   // Troca um item de uma venda por outro produto do estoque, mantendo o
@@ -401,14 +441,15 @@ const localDb = {
       ...c,
       cliente: c.cliente !== false,
       fornecedor: Boolean(c.fornecedor),
+      trading: Boolean(c.trading),
       email: c.email || "",
       documento: c.documento || "",
       observacoes: c.observacoes || "",
     }));
   },
-  async addCliente({nome, contato, email, documento, observacoes, cliente = true, fornecedor = false}) {
+  async addCliente({nome, contato, email, documento, observacoes, cliente = true, fornecedor = false, trading = false}) {
     const all = await localDb.listClientes();
-    const pessoa = {id: uid(), nome: nome.trim(), contato: (contato || "").trim(), email: (email || "").trim(), documento: (documento || "").trim(), observacoes: (observacoes || "").trim(), cliente: Boolean(cliente), fornecedor: Boolean(fornecedor), criadoEm: new Date().toISOString()};
+    const pessoa = {id: uid(), nome: nome.trim(), contato: (contato || "").trim(), email: (email || "").trim(), documento: (documento || "").trim(), observacoes: (observacoes || "").trim(), cliente: Boolean(cliente), fornecedor: Boolean(fornecedor), trading: Boolean(trading), criadoEm: new Date().toISOString()};
     all.unshift(pessoa);
     localStorage.setItem(CLIENTES_KEY, JSON.stringify(all));
     return pessoa;
@@ -558,14 +599,19 @@ function productFromDb(row) {
   const photos = (row.product_photos || [])
     .map(productPhotoFromDb)
     .sort((a, b) => (a.position || 0) - (b.position || 0));
-  return {...row, photos, reparos: Array.isArray(row.reparos) ? row.reparos : [], custoBase: row.custo_base == null ? Number(row.custo) || 0 : Number(row.custo_base), statusAprovacao: row.status_aprovacao || "aprovado", vendaOrigemId: row.venda_origem_id || null, criadoEm: row.created_at};
+  return {...row, photos, reparos: Array.isArray(row.reparos) ? row.reparos : [], custoBase: row.custo_base == null ? Number(row.custo) || 0 : Number(row.custo_base), statusAprovacao: row.status_aprovacao || "aprovado", vendaOrigemId: row.venda_origem_id || null, estornadoEm: row.estornado_em || null, motivoEstorno: row.motivo_estorno || "", estornadoPor: row.estornado_por || null, criadoEm: row.created_at};
 }
 
-function isUuid(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
-}
-
-function productToDb(product) {
+function isUuid(value) {
+
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+
+}
+
+
+
+function productToDb(product) {
+
   const row = {
     kind: product.kind,
     fabricante: product.fabricante || null,
@@ -576,6 +622,7 @@ function productToDb(product) {
     caixa: product.caixa == null ? null : Boolean(product.caixa),
     identifier: product.identifier || null,
     fornecedor: product.fornecedor || null,
+    trading: product.trading || null,
     nome: product.nome || null,
     quantidade: product.quantidade == null || product.quantidade === "" ? null : Number(product.quantidade),
     custo: Number(product.custo) || 0,
@@ -587,14 +634,19 @@ function productToDb(product) {
     incompleto: Boolean(product.incompleto),
     status_aprovacao: product.statusAprovacao || "aprovado",
     venda_origem_id: product.vendaOrigemId || null,
-  };
-  if (isUuid(product.id)) row.id = product.id;
-  return row;
-}
-
+  };
+
+  if (isUuid(product.id)) row.id = product.id;
+
+  return row;
+
+}
+
+
+
 function productPatchToDb(patch) {
   const out = {};
-  ["kind", "fabricante", "modelo", "memoria", "cor", "identifier", "fornecedor", "nome", "categoria", "descricao"].forEach(k => {
+  ["kind", "fabricante", "modelo", "memoria", "cor", "identifier", "fornecedor", "trading", "nome", "categoria", "descricao"].forEach(k => {
     if (Object.prototype.hasOwnProperty.call(patch, k)) out[k] = patch[k] || null;
   });
   if (Object.prototype.hasOwnProperty.call(patch, "bateria")) out.bateria = patch.bateria === "" || patch.bateria == null ? null : Number(patch.bateria);
@@ -626,12 +678,14 @@ function saleItemFromDb(row) {
     productSnapshot: row.product_snapshot ? productFromDb(row.product_snapshot) : null,
     estornadoEm: row.estornado_em,
     motivoEstorno: row.motivo_estorno,
+    estornadoPor: row.estornado_por || null,
     trocadoEm: row.trocado_em,
     trocaDoItemId: row.troca_do_item_id,
   };
 }
 
-function saleItemToDb(saleId, item) {
+function saleItemToDb(saleId, item) {
+
   const row = {
     sale_id: saleId,
     product_id: item.productId || null,
@@ -643,12 +697,18 @@ function saleItemToDb(saleId, item) {
     venda_unit: Number(item.vendaUnit) || 0,
     status: item.status || "ativo",
     product_snapshot: item.productSnapshot ? productToDb(item.productSnapshot) : null,
-    troca_do_item_id: item.trocaDoItemId || null,
-  };
-  if (isUuid(item.id)) row.id = item.id;
-  return row;
-}
-
+    troca_do_item_id: item.trocaDoItemId || null,
+
+  };
+
+  if (isUuid(item.id)) row.id = item.id;
+
+  return row;
+
+}
+
+
+
 function paymentFromDb(row) {
   return {
     id: row.id,
@@ -659,6 +719,10 @@ function paymentFromDb(row) {
     valor: Number(row.valor) || 0,
     bandeira: row.bandeira,
     parcelas: row.parcelas,
+    status: row.status || "ativo",
+    estornadoEm: row.estornado_em || null,
+    motivoEstorno: row.motivo_estorno || "",
+    estornadoPor: row.estornado_por || null,
   };
 }
 
@@ -672,6 +736,7 @@ function paymentToDb(saleId, p) {
     valor: Number(p.valor) || 0,
     bandeira: p.bandeira || null,
     parcelas: p.parcelas || null,
+    status: p.status || "ativo",
   };
 }
 
@@ -686,6 +751,7 @@ function saleFromDb(row) {
     criadoEm: row.created_at,
     criadoPor: row.criado_por || null,
     atualizadoPor: row.atualizado_por || null,
+    estornadoPor: row.estornado_por || null,
   };
 }
 
@@ -694,6 +760,7 @@ function clienteFromDb(row) {
     ...row,
     cliente: row.cliente !== false,
     fornecedor: Boolean(row.fornecedor),
+    trading: Boolean(row.trading),
     email: row.email || "",
     documento: row.documento || "",
     observacoes: row.observacoes || "",
@@ -769,10 +836,10 @@ const supabaseDb = {
       throw result.error;
     }
     const row = result.data || {};
-    return {nomeFantasia: row.nome_fantasia || "", razaoSocial: row.razao_social || "", documento: row.documento || "", telefone: row.telefone || "", email: row.email || "", endereco: row.endereco || "", logoData: row.logo_data || ""};
+    return {nomeFantasia: row.nome_fantasia || "", slogan: row.slogan || "", razaoSocial: row.razao_social || "", documento: row.documento || "", telefone: row.telefone || "", email: row.email || "", endereco: row.endereco || "", logoData: row.logo_data || ""};
   },
   async saveCompanySettings(data) {
-    const row = {id: 1, nome_fantasia: data.nomeFantasia?.trim() || null, razao_social: data.razaoSocial?.trim() || null, documento: data.documento?.trim() || null, telefone: data.telefone?.trim() || null, email: data.email?.trim() || null, endereco: data.endereco?.trim() || null, logo_data: data.logoData || null, updated_at: new Date().toISOString(), ativo: true, inativado_em: null};
+    const row = {id: 1, nome_fantasia: data.nomeFantasia?.trim() || null, slogan: data.slogan?.trim() || null, razao_social: data.razaoSocial?.trim() || null, documento: data.documento?.trim() || null, telefone: data.telefone?.trim() || null, email: data.email?.trim() || null, endereco: data.endereco?.trim() || null, logo_data: data.logoData || null, updated_at: new Date().toISOString(), ativo: true, inativado_em: null};
     const result = await supabaseClient.from("configuracoes_empresa").upsert(row, {onConflict: "id"}).select("*").single();
     if (result.error) throw new Error(result.error.message?.includes("configuracoes_empresa") ? "Execute novamente o arquivo supabase.sql antes de salvar os dados da empresa." : result.error.message);
     return supabaseDb.getCompanySettings();
@@ -845,20 +912,13 @@ const supabaseDb = {
     return productFromDb(data);
   },
   async listSuppliers() {
-    let suppliersQuery = supabaseClient.from("suppliers").select("name,ativo").order("name");
     let pessoasQuery = supabaseClient.from("clientes").select("id,nome,ativo").eq("fornecedor", true).order("nome");
     if (!showInactiveRecords()) {
-      suppliersQuery = suppliersQuery.eq("ativo", true);
       pessoasQuery = pessoasQuery.eq("ativo", true);
     }
-    const [supplierRows, pessoaRows] = await Promise.all([suppliersQuery, pessoasQuery]);
-    const suppliers = dbThrow(supplierRows).map(row => ({id: row.name, name: row.name, ativo: row.ativo !== false}));
-    for (const pessoa of dbThrow(pessoaRows)) {
-      if (!suppliers.some(item => item.name.toLocaleLowerCase("pt-BR") === pessoa.nome.toLocaleLowerCase("pt-BR"))) {
-        suppliers.push({id: pessoa.id, name: pessoa.nome, ativo: pessoa.ativo !== false});
-      }
-    }
-    return suppliers.sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+    return dbThrow(await pessoasQuery)
+      .map(pessoa => ({id: pessoa.id, name: pessoa.nome, ativo: pessoa.ativo !== false}))
+      .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
   },
   async addSupplier(input) {
     const values = typeof input === "string" ? {nome: input} : input;
@@ -906,6 +966,18 @@ const supabaseDb = {
     if (result.error && !isMissingFabricantesTable(result.error)) throw result.error;
     return result.error ? mergeFabricantes([name], await supabaseDb.listProducts()) : supabaseDb.listFabricantes();
   },
+  async listProductTypes() {
+    const result = await supabaseClient.from("product_types").select("key,label,icon,sub").eq("ativo", true).order("label");
+    if (result.error) throw new Error("Execute o arquivo supabase-tipos-produto.sql no Supabase para liberar tipos personalizados.");
+    return syncProductTypes(result.data || []);
+  },
+  async addProductType(label) {
+    const clean = String(label || "").trim();
+    const key = productTypeKey(clean);
+    if (!clean || !key) throw new Error("Informe um nome válido para o tipo de produto.");
+    dbThrow(await supabaseClient.from("product_types").upsert({key, label: clean, icon: "ti-box", sub: "Serial · sem qtd", ativo: true}, {onConflict: "key"}));
+    return supabaseDb.listProductTypes();
+  },
   async deleteFabricante(name) {
     const result = await supabaseClient.from("fabricantes").update({ativo: false, inativado_em: new Date().toISOString()}).eq("nome", name);
     if (result.error && !isMissingFabricantesTable(result.error)) throw result.error;
@@ -942,12 +1014,15 @@ const supabaseDb = {
       itensVenda.push({id: uid(), tipo: "produto", status: "ativo", productId: item.productId, kind: item.kind, quantidade: item.quantidade, vendaUnit: item.vendaUnit, nome: item.nome, sub: item.sub, productSnapshot: produtoAtual ? {...produtoAtual} : null});
     }
     for (const item of extras) {
-      itensVenda.push({id: uid(), tipo: item.tipo || "protecao", status: "ativo", productId: null, kind: item.kind, quantidade: item.quantidade, vendaUnit: item.vendaUnit, nome: item.nome, sub: item.sub, productSnapshot: null});
+      itensVenda.push({id: uid(), tipo: item.tipo || "protecao", status: "ativo", productId: null, kind: item.kind, quantidade: item.quantidade, vendaUnit: item.vendaUnit, nome: item.nome, sub: item.sub, productSnapshot: item.productSnapshot || null});
     }
     if (itensVenda.length) dbThrow(await supabaseClient.from("sale_items").insert(itensVenda.map(i => saleItemToDb(sale.id, i))));
     if (pagamentos.length) dbThrow(await supabaseClient.from("sale_payments").insert(pagamentos.map(p => paymentToDb(sale.id, p))));
     for (const tradeIn of tradeIns) {
       await supabaseDb.addTradeIn({...tradeIn, vendaOrigemId: sale.id});
+    }
+    if (tradeIns.length > 0 && cliente?.id) {
+      dbThrow(await supabaseClient.from("clientes").update({trading: true}).eq("id", cliente.id));
     }
     const savedSale = saleFromDb({...sale, sale_items: itensVenda.map(i => saleItemToDb(sale.id, i)), sale_payments: pagamentos.map(p => paymentToDb(sale.id, p))});
     savedSale.cliente.documento = cliente.documento || "";
@@ -959,7 +1034,14 @@ const supabaseDb = {
     return {sale: sales.find(s => s.id === saleId), products};
   },
   async estornarVenda(saleId, motivo) {
-    dbThrow(await supabaseClient.from("sale_items").update({status: "estornado", estornado_em: new Date().toISOString(), motivo_estorno: motivo || "Estorno integral da venda"}).eq("sale_id", saleId).eq("status", "ativo"));
+    const result = await supabaseClient.rpc("fn_estornar_venda", {p_sale_id: saleId, p_motivo: motivo || "Estorno integral da venda"});
+    if (result.error) {
+      const message = String(result.error.message || "");
+      if (message.includes("fn_estornar_venda") || result.error.code === "PGRST202") {
+        throw new Error("O banco ainda não possui o estorno completo. Execute o arquivo supabase-estornos.sql no SQL Editor do Supabase.");
+      }
+      throw result.error;
+    }
     const [sales, products] = await Promise.all([supabaseDb.listSales(), supabaseDb.listProducts()]);
     return {sale: sales.find(s => s.id === saleId), products};
   },
@@ -982,7 +1064,7 @@ const supabaseDb = {
     const data = dbThrow(await query);
     return data.map(clienteFromDb);
   },
-  async addCliente({nome, contato, email, documento, observacoes, cliente = true, fornecedor = false}) {
+  async addCliente({nome, contato, email, documento, observacoes, cliente = true, fornecedor = false, trading = false}) {
     const digits = String(documento || "").replace(/\D/g, "");
     if (digits) {
       const rows = dbThrow(await supabaseClient.from("clientes").select("nome,documento").not("documento", "is", null));
@@ -991,7 +1073,7 @@ const supabaseDb = {
     }
     const normalizedName = nome.trim();
     if (fornecedor) await ensureSupplierRecord(normalizedName);
-    const data = dbThrow(await supabaseClient.from("clientes").insert({nome: normalizedName, contato: (contato || "").trim() || null, email: (email || "").trim() || null, documento: (documento || "").trim() || null, observacoes: (observacoes || "").trim() || null, cliente: Boolean(cliente), fornecedor: Boolean(fornecedor)}).select("*").single());
+    const data = dbThrow(await supabaseClient.from("clientes").insert({nome: normalizedName, contato: (contato || "").trim() || null, email: (email || "").trim() || null, documento: (documento || "").trim() || null, observacoes: (observacoes || "").trim() || null, cliente: Boolean(cliente), fornecedor: Boolean(fornecedor), trading: Boolean(trading)}).select("*").single());
     return clienteFromDb(data);
   },
   async updateCliente(id, patch) {
@@ -1004,7 +1086,8 @@ const supabaseDb = {
       }
     }
     const clean = {};
-    if (Object.prototype.hasOwnProperty.call(patch, "nome")) clean.nome = patch.nome;
+    if (Object.prototype.hasOwnProperty.call(patch, "nome")) clean.nome = patch.nome;
+
     if (Object.prototype.hasOwnProperty.call(patch, "contato")) clean.contato = patch.contato || null;
 
     if (Object.prototype.hasOwnProperty.call(patch, "email")) clean.email = patch.email || null;
@@ -1012,12 +1095,14 @@ const supabaseDb = {
     if (Object.prototype.hasOwnProperty.call(patch, "observacoes")) clean.observacoes = patch.observacoes || null;
     if (Object.prototype.hasOwnProperty.call(patch, "cliente")) clean.cliente = Boolean(patch.cliente);
     if (Object.prototype.hasOwnProperty.call(patch, "fornecedor")) clean.fornecedor = Boolean(patch.fornecedor);
+    if (Object.prototype.hasOwnProperty.call(patch, "trading")) clean.trading = Boolean(patch.trading);
     if (clean.fornecedor) {
       const current = dbThrow(await supabaseClient.from("clientes").select("nome").eq("id", id).single());
       await ensureSupplierRecord(clean.nome || current.nome);
     }
     const data = dbThrow(await supabaseClient.from("clientes").update(clean).eq("id", id).select("*").single());
-    return clienteFromDb(data);
+    return clienteFromDb(data);
+
   },
   async listProtecaoPlanos() {
     let query = supabaseClient.from("protecao_planos").select("*").order("modelo");
@@ -1031,12 +1116,18 @@ const supabaseDb = {
     ));
     return supabaseDb.listProtecaoPlanos();
   },
-  async updateProtecaoPlano(id, patch) {
-    const clean = {};
-    if (Object.prototype.hasOwnProperty.call(patch, "modelo")) clean.modelo = patch.modelo;
-    if (Object.prototype.hasOwnProperty.call(patch, "valor")) clean.valor = Number(patch.valor) || 0;
-    dbThrow(await supabaseClient.from("protecao_planos").update(clean).eq("id", id));
-    return supabaseDb.listProtecaoPlanos();
+  async updateProtecaoPlano(id, patch) {
+
+    const clean = {};
+
+    if (Object.prototype.hasOwnProperty.call(patch, "modelo")) clean.modelo = patch.modelo;
+
+    if (Object.prototype.hasOwnProperty.call(patch, "valor")) clean.valor = Number(patch.valor) || 0;
+
+    dbThrow(await supabaseClient.from("protecao_planos").update(clean).eq("id", id));
+
+    return supabaseDb.listProtecaoPlanos();
+
   },
   async deleteProtecaoPlano(id) {
     dbThrow(await supabaseClient.from("protecao_planos").update({ativo: false, inativado_em: new Date().toISOString()}).eq("id", id));
@@ -1121,13 +1212,8 @@ const supabaseDb = {
     return supabaseDb.listCommissionRates();
   },
   async addTradeIn(data) {
-    if (data.fornecedor) {
-      dbThrow(await supabaseClient.from("suppliers").upsert({name: data.fornecedor, ativo: true, inativado_em: null}, {onConflict: "name"}));
-      let clientUpdate = supabaseClient.from("clientes").update({fornecedor: true});
-      clientUpdate = data.clienteId ? clientUpdate.eq("id", data.clienteId) : clientUpdate.eq("nome", data.fornecedor);
-      dbThrow(await clientUpdate);
-    }
-    const product = {id: data.id, kind: data.kind, fabricante: data.kind === "outro" ? null : data.fabricante || null, modelo: data.modelo.trim() || "(a completar)", nome: null, memoria: data.kind === "outro" ? null : data.memoria || null, cor: data.kind === "outro" ? null : data.cor || null, bateria: data.kind === "outro" || data.bateria === "" ? null : data.bateria, caixa: data.kind === "outro" ? null : data.caixa, identifier: data.kind === "outro" ? null : data.identifier || null, fornecedor: data.kind === "outro" ? null : data.fornecedor || null, quantidade: null, custo: Number(data.valor) || 0, venda: 0, categoria: data.kind === "outro" ? "Outro item em troca" : "Troca — aguardando aprovação", descricao: data.descricao || null, incompleto: true, statusAprovacao: "aguardando", vendaOrigemId: data.vendaOrigemId || null, photos: data.kind === "outro" ? [] : data.photos || [], criadoEm: new Date().toISOString()};
+    if (data.clienteId) dbThrow(await supabaseClient.from("clientes").update({trading: true}).eq("id", data.clienteId));
+    const product = {id: data.id, kind: data.kind, fabricante: data.kind === "outro" ? null : data.fabricante || null, modelo: data.modelo.trim() || "(a completar)", nome: null, memoria: data.kind === "outro" ? null : data.memoria || null, cor: data.kind === "outro" ? null : data.cor || null, bateria: data.kind === "outro" || data.bateria === "" ? null : data.bateria, caixa: data.kind === "outro" ? null : data.caixa, identifier: data.kind === "outro" ? null : data.identifier || null, fornecedor: null, trading: data.kind === "outro" ? null : data.fornecedor || null, quantidade: null, custoBase: Number(data.custoBase ?? data.valor) || 0, reparos: Array.isArray(data.reparos) ? data.reparos : [], custo: (Number(data.custoBase ?? data.valor) || 0) + (Array.isArray(data.reparos) ? data.reparos.reduce((total, repair) => total + (Number(repair.valor) || 0), 0) : 0), venda: 0, categoria: data.kind === "outro" ? "Outro item em troca" : "Troca — aguardando aprovação", descricao: data.descricao || null, incompleto: true, statusAprovacao: "aguardando", vendaOrigemId: data.vendaOrigemId || null, photos: data.kind === "outro" ? [] : data.photos || [], criadoEm: new Date().toISOString()};
     return supabaseDb.saveProduct(product);
   },
 };
@@ -1281,12 +1367,13 @@ async function syncLocalStorageToSupabase() {
       nome: String(pessoa.nome).trim(), contato: String(pessoa.contato || "").trim() || null,
       email: String(pessoa.email || "").trim() || null, documento: String(pessoa.documento || "").trim() || null,
       observacoes: String(pessoa.observacoes || "").trim() || null, cliente: pessoa.cliente !== false,
-      fornecedor: Boolean(pessoa.fornecedor),
+      fornecedor: Boolean(pessoa.fornecedor), trading: Boolean(pessoa.trading),
     };
     const existing = existingClientes.find(c => sameClienteKey(c) === sameClienteKey(pessoa));
     if (existing) {
       row.cliente = Boolean(existing.cliente) || row.cliente;
       row.fornecedor = Boolean(existing.fornecedor) || row.fornecedor;
+      row.trading = Boolean(existing.trading) || row.trading;
       dbThrow(await supabaseClient.from("clientes").update(row).eq("id", existing.id));
     } else {
       dbThrow(await supabaseClient.from("clientes").insert(row));
@@ -1342,11 +1429,15 @@ async function syncLocalStorageToSupabase() {
 async function getCurrentSession() {
   if (!SUPABASE_READY) return null;
   const {data, error} = await supabaseClient.auth.getSession();
-  if (error) {
-    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
+  if (error) {
+
+    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
+
       throw new Error("Tabela de usuários não encontrada. Rode o arquivo supabase.sql no SQL Editor do Supabase e depois recarregue a página.");
-    }
-    throw error;
+    }
+
+    throw error;
+
   }
   return data.session;
 }
@@ -1358,11 +1449,15 @@ async function getUserProfile(userId) {
     .select("*")
     .eq("id", userId)
     .maybeSingle();
-  if (error) {
-    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
+  if (error) {
+
+    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
+
       throw new Error("Tabela de usuários não encontrada. Rode o arquivo supabase.sql no SQL Editor do Supabase e depois recarregue a página.");
-    }
-    throw error;
+    }
+
+    throw error;
+
   }
   if (!data) {
     throw new Error("Perfil de usuário não encontrado. Rode o supabase.sql atualizado no SQL Editor do Supabase e tente entrar novamente.");
@@ -1372,11 +1467,15 @@ async function getUserProfile(userId) {
 
 async function signInUser({email, password}) {
   const {data, error} = await supabaseClient.auth.signInWithPassword({email, password});
-  if (error) {
-    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
+  if (error) {
+
+    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
+
       throw new Error("Tabela de usuários não encontrada. Rode o arquivo supabase.sql no SQL Editor do Supabase e depois recarregue a página.");
-    }
-    throw error;
+    }
+
+    throw error;
+
   }
   return data;
 }
@@ -1398,22 +1497,31 @@ async function signUpUser({email, password, fullName}) {
     password,
     options: {data: {full_name: fullName}},
   });
-  if (error) {
-    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
+  if (error) {
+
+    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
+
       throw new Error("Tabela de usuários não encontrada. Rode o arquivo supabase.sql no SQL Editor do Supabase e depois recarregue a página.");
-    }
-    throw error;
+    }
+
+    throw error;
+
   }
   return data;
 }
 
 async function signOutUser() {
   const {error} = await supabaseClient.auth.signOut();
-  if (error) {
-    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
-      throw new Error("Tabela de usuários não encontrada. Rode o arquivo supabase.sql no SQL Editor do Supabase e depois recarregue a página.");
-    }
-    throw error;
+  if (error) {
+
+    if (error.code === "PGRST205" || error.message?.includes("user_profiles")) {
+
+      throw new Error("Tabela de usuários não encontrada. Rode o arquivo supabase.sql no SQL Editor do Supabase e depois recarregue a página.");
+
+    }
+
+    throw error;
+
   }
 }
 
@@ -1471,6 +1579,21 @@ const KINDS = [
   {key: "acessorio", label: "Acessório", icon: "ti-cable", sub: "Com quantidade"},
   {key: "outro", label: "Outro", icon: "ti-box", sub: "Item recebido na troca"},
 ];
+const PRODUCT_TYPES_KEY = "start_product_types_v1";
+
+function syncProductTypes(types = []) {
+  types.forEach(type => {
+    if (!type?.key || KINDS.some(item => item.key === type.key)) return;
+    const normalized = {key: type.key, label: type.label, icon: type.icon || "ti-box", sub: type.sub || "Serial · sem qtd"};
+    KINDS.push(normalized);
+    KIND_META[normalized.key] = normalized;
+  });
+  return KINDS.filter(item => item.key !== "outro");
+}
+
+function productTypeKey(label) {
+  return String(label || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+}
 
 const FABRICANTES = {
   celular: ["Apple", "Samsung", "Xiaomi", "Motorola", "Google"],
@@ -1492,7 +1615,7 @@ function mergeFabricantes(saved = [], products = []) {
 
 function fabricantesMaisUsados(kind, fabricantes, products) {
   const scoped = products.filter(product => product.kind === kind && product.fabricante);
-  if (!scoped.length) return FABRICANTES[kind] || [];
+  if (!scoped.length) return mergeFabricantes([...(FABRICANTES[kind] || []), ...fabricantes], products);
   const counts = new Map();
   scoped.forEach(product => {
     const key = product.fabricante.toLocaleLowerCase("pt-BR");
@@ -1501,7 +1624,7 @@ function fabricantesMaisUsados(kind, fabricantes, products) {
   const candidates = mergeFabricantes([...(FABRICANTES[kind] || []), ...fabricantes], scoped);
   return candidates
     .sort((a, b) => (counts.get(b.toLocaleLowerCase("pt-BR")) || 0) - (counts.get(a.toLocaleLowerCase("pt-BR")) || 0) || a.localeCompare(b))
-    .slice(0, 5);
+    .slice(0, Math.max(5, fabricantes.length));
 }
 
 const MEMORIAS = ["64GB", "128GB", "256GB", "512GB", "1TB", "2TB"];
@@ -1512,6 +1635,11 @@ const CATEGORIAS = {
   mac: ["Seminovo", "Novo", "Lacrado"],
   jbl: ["Novo", "Seminovo", "Vitrine"],
 };
+const CATEGORIAS_PADRAO_PRODUTO = ["Seminovo", "Novo", "Lacrado", "Vitrine"];
+
+function productKindUsesManufacturer(kind) {
+  return !["jbl", "acessorio", "outro"].includes(kind);
+}
 
 const KIND_META = Object.fromEntries(KINDS.map(k => [k.key, k]));
 
@@ -1694,7 +1822,8 @@ async function uploadProductPhotos(productId, photos) {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || "Nao foi possivel enviar imagens.");
   return payload.photos || [];
-}
+}
+
 function normalizeBatteryInput(value) {
   const integerPart = String(value ?? "").split(/[.,]/)[0].replace(/\D/g, "").slice(0, 3);
   if (!integerPart) return "";
@@ -1812,7 +1941,7 @@ function validate(form) {
     need("categoria");
     if (form.quantidade !== "" && Number(form.quantidade) < 0) errs.quantidade = "Não pode ser negativo";
   } else {
-    if (form.kind === "celular" || form.kind === "ipad" || form.kind === "mac") {
+    if (productKindUsesManufacturer(form.kind)) {
       need("fabricante");
     }
     need("modelo");
@@ -1841,16 +1970,23 @@ function validate(form) {
    FORMULÁRIO DE CADASTRO
    ========================================================================= */
 
-function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, onAddAcessorioCategoria, fabricantes, products, onAddFabricante, canUploadPhotos}) {
+function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, onAddAcessorioCategoria, fabricantes, products, productTypes, onAddProductType, onAddFabricante, canUploadPhotos}) {
   const [kind, setKind] = useState("celular");
   const [form, setForm] = useState(emptyFormFor("celular"));
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState(false);
-  const [photoUploadsReady, setPhotoUploadsReady] = useState(false);
+  const [toast, setToast] = useState(false);
+  const [addingType, setAddingType] = useState(false);
+  const [newTypeName, setNewTypeName] = useState("");
+  const [typeError, setTypeError] = useState("");
+  const [typeMenuOpen, setTypeMenuOpen] = useState(false);
+  const typeSelectorRef = useRef(null);
+  const [photoUploadsReady, setPhotoUploadsReady] = useState(false);
+
   const [checkingPhotoUploads, setCheckingPhotoUploads] = useState(true);
 
-  const set = (field, val) => setForm(f => ({...f, [field]: val}));
+  const set = (field, val) => setForm(f => ({...f, [field]: val}));
+
   const photos = form.photos || [];
 
   const switchKind = (k) => {
@@ -1858,6 +1994,26 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
     setForm(emptyFormFor(k));
     setErrors({});
   };
+  const saveProductType = async () => {
+    setTypeError("");
+    try {
+      const list = await onAddProductType(newTypeName);
+      const created = list.find(item => item.key === productTypeKey(newTypeName));
+      if (created) switchKind(created.key);
+      setNewTypeName("");
+      setAddingType(false);
+    } catch (error) {
+      setTypeError(error?.message || "Não foi possível adicionar o tipo.");
+    }
+  };
+  useEffect(() => {
+    if (!typeMenuOpen) return;
+    const closeMenu = event => {
+      if (!typeSelectorRef.current?.contains(event.target)) setTypeMenuOpen(false);
+    };
+    document.addEventListener("mousedown", closeMenu);
+    return () => document.removeEventListener("mousedown", closeMenu);
+  }, [typeMenuOpen]);
 
   useEffect(() => {
     let active = true;
@@ -1918,9 +2074,10 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
       delete next.photos;
       return next;
     });
-  };
+  };
+
   const identifierLabel = kind === "celular" ? "IMEI" : "Serial";
-  const showFabricante = kind === "celular" || kind === "ipad" || kind === "mac";
+  const showFabricante = productKindUsesManufacturer(kind);
   const showMemoria = kind !== "jbl" && kind !== "acessorio";
   const showBateria = kind === "celular";
 
@@ -2002,21 +2159,27 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
 
   return (
     <div>
-      <div className="kind-grid">
-        {KINDS.filter(k => k.key !== "outro").map(k => (
-          <button type="button" key={k.key} className={"kind-card" + (kind === k.key ? " active" : "")} onClick={() => switchKind(k.key)}>
-            <i className={"ti " + k.icon} aria-hidden="true"></i>
-            <div>
-              <div className="kt">{k.label}</div>
-              <div className="ks">{k.sub}</div>
-            </div>
-          </button>
-        ))}
+      <div className="product-type-selector">
+        <label htmlFor="product-type-select">Tipo de produto</label>
+        <div className="product-type-select-row">
+          <div className="system-select product-type-system-select" ref={typeSelectorRef}>
+            <button id="product-type-select" className={"system-select-trigger" + (typeMenuOpen ? " open" : "")} type="button" onClick={() => setTypeMenuOpen(open => !open)} aria-haspopup="listbox" aria-expanded={typeMenuOpen}>
+              <span><i className={"ti " + (KIND_META[kind]?.icon || "ti-box")} aria-hidden="true"></i>{KIND_META[kind]?.label || kind}</span><i className={"ti ti-chevron-" + (typeMenuOpen ? "up" : "down")} aria-hidden="true"></i>
+            </button>
+            {typeMenuOpen && <div className="system-select-menu" role="listbox" aria-labelledby="product-type-select">
+              {(productTypes || KINDS.filter(item => item.key !== "outro")).map(item => <button type="button" role="option" aria-selected={kind === item.key} className={kind === item.key ? "selected" : ""} key={item.key} onClick={() => { switchKind(item.key); setTypeMenuOpen(false); }}><span><i className={"ti " + (item.icon || "ti-box")} aria-hidden="true"></i>{item.label}</span>{kind === item.key && <Check size={15} aria-hidden="true" />}</button>)}
+              <button className="system-select-add" type="button" onClick={() => { setTypeMenuOpen(false); setAddingType(true); }}><span><Plus size={15} aria-hidden="true" />Adicionar novo tipo...</span></button>
+            </div>}
+          </div>
+          <span><i className={"ti " + (KIND_META[kind]?.icon || "ti-box")} aria-hidden="true"></i>{KIND_META[kind]?.sub || "Serial · sem quantidade"}</span>
+        </div>
+        {addingType && <div className="product-type-add"><input autoFocus value={newTypeName} onChange={event => setNewTypeName(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); saveProductType(); } }} placeholder="Ex.: Notebook, Console, Smartwatch" /><button className="btn ghost" type="button" onClick={() => { setAddingType(false); setNewTypeName(""); setTypeError(""); }}>Cancelar</button><button className="btn primary" type="button" onClick={saveProductType}>Adicionar</button></div>}
+        {typeError && <div className="form-error" role="alert">{typeError}</div>}
       </div>
 
       <form className="panel" onSubmit={handleSubmit} noValidate>
         <div className="panel-head">
-          <h2><i className={"ti " + KIND_META[kind].icon} aria-hidden="true"></i>Novo {KIND_META[kind].label.toLowerCase()}</h2>
+          <h2><i className={"ti " + (KIND_META[kind]?.icon || "ti-box")} aria-hidden="true"></i>Novo {(KIND_META[kind]?.label || kind).toLowerCase()}</h2>
           <span className="sub">{isAcessorio ? "controla quantidade em estoque" : `identificado por ${identifierLabel} · sem quantidade`}</span>
         </div>
 
@@ -2101,7 +2264,7 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
               <Field label="Categoria" required error={errors.categoria}>
                 <select value={form.categoria} onChange={e => set("categoria", e.target.value)} className={errors.categoria ? "invalid" : ""}>
                   <option value="">Selecionar</option>
-                  {CATEGORIAS[kind].map(c => <option key={c} value={c}>{c}</option>)}
+                  {(CATEGORIAS[kind] || CATEGORIAS_PADRAO_PRODUTO).map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </Field>
               <Field label="Custo" required error={errors.custo}>
@@ -2139,7 +2302,8 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
             </div>
           )}
           {errors.photos && <div className="err">{errors.photos}</div>}
-        </div>
+        </div>
+
         {errors.submit && <div className="auth-alert danger product-save-error">{errors.submit}</div>}
 
         <div className="actions">
@@ -2225,20 +2389,22 @@ function ProductDetailsModal({product, usersById, clientes = [], bandeiras = [],
     [product.kind === "celular" ? "IMEI" : "Número de série", product.identifier],
     ["Bateria", product.bateria == null ? null : `${product.bateria}%`],
     ["Caixa", product.caixa == null ? null : (product.caixa ? "Sim" : "Não")],
-    ["Fornecedor", product.fornecedor], ["Quantidade", product.quantidade],
+    [product.vendaOrigemId ? "Trading" : "Fornecedor", product.trading || product.fornecedor], ["Quantidade", product.quantidade],
     ["Custo base", product.reparos?.length ? formatBRL(product.custoBase) : null],
     ["Total de reparos", product.reparos?.length ? formatBRL(product.reparos.reduce((total, repair) => total + (Number(repair.valor) || 0), 0)) : null],
     ["Custo final", formatBRL(product.custo)], ["Venda", formatBRL(product.venda)],
     ["Lucro unitário", formatBRL(Number(product.venda || 0) - Number(product.custo || 0))],
-    ["Status", product.vendido ? "Vendido" : product.ativo === false ? "Inativo" : "Ativo"],
-    ["Aprovação", product.statusAprovacao === "aguardando" ? "Aguardando aprovação" : product.statusAprovacao === "reprovado" ? "Reprovado" : "Aprovado"],
+    ["Status", product.statusAprovacao === "estornado" ? "Estornado" : product.vendido ? "Vendido" : product.ativo === false ? "Inativo" : "Ativo"],
+    ["Aprovação", product.statusAprovacao === "estornado" ? "Estornado" : product.statusAprovacao === "aguardando" ? "Aguardando aprovação" : product.statusAprovacao === "reprovado" ? "Reprovado" : "Aprovado"],
+    ["Motivo do estorno", product.motivoEstorno],
+    ["Estornado pelo usuário", userLabel(product.estornadoPor)],
     ["Venda de origem", product.vendaOrigemId],
     ["Cadastro", product.criadoEm ? new Date(product.criadoEm).toLocaleString("pt-BR") : null],
     ["Inativado em", product.inativado_em ? new Date(product.inativado_em).toLocaleString("pt-BR") : null],
     ["Criado pelo usuário", userLabel(product.criado_por)], ["Última alteração por", userLabel(product.atualizado_por)],
   ].filter(([, value]) => value !== null && value !== undefined && value !== "");
   const financialLabels = new Set(["Custo base", "Total de reparos", "Custo final", "Venda", "Lucro unitário"]);
-  const auditLabels = new Set(["Status", "Aprovação", "Venda de origem", "Cadastro", "Inativado em", "Criado pelo usuário", "Última alteração por"]);
+  const auditLabels = new Set(["Status", "Aprovação", "Motivo do estorno", "Estornado pelo usuário", "Venda de origem", "Cadastro", "Inativado em", "Criado pelo usuário", "Última alteração por"]);
   const generalDetails = details.filter(([label]) => !financialLabels.has(label) && !auditLabels.has(label));
   const financialDetails = details.filter(([label]) => financialLabels.has(label));
   const auditDetails = details.filter(([label]) => auditLabels.has(label));
@@ -2282,13 +2448,17 @@ function ProductDetailsModal({product, usersById, clientes = [], bandeiras = [],
       setDirectSaleSaving(false);
     }
   };
-  const renderDetail = ([label, value]) => <div className={"product-detail-card" + (label === "Lucro unitário" ? " profit" : "")} key={label}><span>{label}</span>{label === "IMEI" ? <button className="product-imei-copy" type="button" onClick={copyImei} title="Copiar IMEI" aria-label="Copiar IMEI"><strong>{formatImei(value)}</strong>{imeiCopied ? <Check size={16} aria-hidden="true" /> : <Copy size={16} aria-hidden="true" />}</button> : <strong>{String(value)}</strong>}</div>;
+  const renderDetail = ([label, value]) => {
+    const isProfit = label === "Lucro unitário";
+    const profitValue = Number(product.venda || 0) - Number(product.custo || 0);
+    return <div className={"product-detail-card" + (isProfit ? profitValue >= 0 ? " profit" : " loss" : "")} key={label}><span>{label}</span>{label === "IMEI" ? <button className="product-imei-copy" type="button" onClick={copyImei} title="Copiar IMEI" aria-label="Copiar IMEI"><strong>{formatImei(value)}</strong>{imeiCopied ? <Check size={16} aria-hidden="true" /> : <Copy size={16} aria-hidden="true" />}</button> : <strong>{String(value)}</strong>}</div>;
+  };
 
   return (
     <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className="modal product-details-modal" role="dialog" aria-modal="true" aria-labelledby="product-details-title">
+      <div className="modal product-details-modal product-receipt-layout" role="dialog" aria-modal="true" aria-labelledby="product-details-title">
         <div className="product-details-head">
-          <div className="product-details-heading"><span className="product-details-symbol"><ShoppingBag size={20} aria-hidden="true" /></span><div><h3 id="product-details-title">{productDisplayName(product)}</h3><p>Informações completas do produto</p><div className="product-details-badges"><span className={"badge cat-" + product.kind}>{KIND_META[product.kind]?.label || product.kind}</span><span className="badge">{product.vendido ? "Vendido" : product.ativo === false ? "Inativo" : "Ativo"}</span></div></div></div>
+          <div className="product-details-heading"><span className="product-details-symbol"><ShoppingBag size={20} aria-hidden="true" /></span><div><h3 id="product-details-title">{productDisplayName(product)}</h3><p>Informações completas do produto</p><div className="product-details-badges"><span className={"badge cat-" + product.kind}>{KIND_META[product.kind]?.label || product.kind}</span><span className="badge">{product.statusAprovacao === "estornado" ? "Estornado" : product.vendido ? "Vendido" : product.ativo === false ? "Inativo" : "Ativo"}</span></div></div></div>
           <button className="icon-btn" type="button" onClick={onClose} aria-label="Fechar detalhes" title="Fechar"><X size={20} strokeWidth={2} aria-hidden="true" /></button>
         </div>
         {product.photos?.length > 0 && <div className="product-details-photos">{product.photos.map(photo => photo.url && <img key={photo.id || photo.key || photo.url} src={photo.url} alt={photo.name || productDisplayName(product)} />)}</div>}
@@ -2323,7 +2493,7 @@ function ProductDetailsModal({product, usersById, clientes = [], bandeiras = [],
             <button className="btn trade-approve-button" type="button" onClick={() => onApprove(product)}><Check size={17} aria-hidden="true" />Aprovar</button>
           </> : <>
           {!product.vendido && product.ativo !== false && product.statusAprovacao !== "aguardando" && <button className="btn direct-sale-launch" type="button" onClick={() => setDirectSaleOpen(open => !open)}><BadgeDollarSign size={17} aria-hidden="true" />Venda direta</button>}
-          <button className="btn ghost" type="button" onClick={() => onEdit(product)}><Pencil size={17} aria-hidden="true" />Editar</button>
+          <button className="btn edit-action-button" type="button" onClick={() => onEdit(product)}><Pencil size={17} aria-hidden="true" />Editar</button>
           {product.vendido ? null : product.ativo === false ? (
             <button className="btn ghost" type="button" onClick={() => onRestore(product)}><RefreshCw size={17} aria-hidden="true" />Reativar</button>
           ) : (
@@ -2379,13 +2549,13 @@ function EditProductModal({product, suppliers, onAddSupplier, onSave, onCancel})
     : (product.statusAprovacao === "aguardando" ? [{id: uid(), descricao: "", valor: ""}] : []));
   const [repairsOpen, setRepairsOpen] = useState(false);
 
-  const set = (field, val) => setForm(f => ({...f, [field]: val}));
+  const set = (field, val) => setForm(f => ({...f, [field]: val}));
+
   const kind = product.kind;
-  const showFabricante = kind === "celular" || kind === "ipad" || kind === "mac";
+  const showFabricante = productKindUsesManufacturer(kind);
   const showMemoria = kind !== "jbl";
   const showBateria = kind === "celular";
 
-  const showRepairs = product.statusAprovacao === "aguardando" || repairs.length > 0;
   const repairsTotal = useMemo(() => repairs.reduce((total, repair) => total + (Number(repair.valor) || 0), 0), [repairs]);
   const finalCost = (Number(form.custo) || 0) + repairsTotal;
   const addRepair = () => setRepairs(items => [...items, {id: uid(), descricao: "", valor: ""}]);
@@ -2424,7 +2594,7 @@ function EditProductModal({product, suppliers, onAddSupplier, onSave, onCancel})
       custoBase: Number(form.custo) || 0,
       reparos: savedRepairs,
       venda: Number(form.venda) || 0,
-      categoria: form.categoria || KIND_META[kind].label,
+      categoria: form.categoria || KIND_META[kind]?.label || kind,
       incompleto: false,
       statusAprovacao: product.statusAprovacao === "aguardando" ? "aprovado" : product.statusAprovacao,
     });
@@ -2489,10 +2659,10 @@ function EditProductModal({product, suppliers, onAddSupplier, onSave, onCancel})
           <Field label="Categoria">
             <select value={form.categoria} onChange={e => set("categoria", e.target.value)}>
               <option value="">Selecionar</option>
-              {(CATEGORIAS[kind] || []).map(c => <option key={c} value={c}>{c}</option>)}
+              {(CATEGORIAS[kind] || CATEGORIAS_PADRAO_PRODUTO).map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </Field>
-          <Field label="Custo base (valor da troca)">
+          <Field label={product.vendaOrigemId ? "Custo base (valor da troca)" : "Custo base"}>
             <BRLCurrencyInput value={form.custo} onChange={value => set("custo", value)} />
           </Field>
           <Field label={repairsTotal > 0 ? "Venda (considere o custo final)" : "Venda"}>
@@ -2506,9 +2676,9 @@ function EditProductModal({product, suppliers, onAddSupplier, onSave, onCancel})
           <p>Defina o valor de venda considerando todos os custos acima.</p>
         </div>}
 
-        {showRepairs && <div className={"repair-section" + (repairsOpen ? " open" : "")}>
+        <div className={"repair-section" + (repairsOpen ? " open" : "")}>
           <button type="button" className="repair-accordion-trigger" onClick={() => setRepairsOpen(value => !value)} aria-expanded={repairsOpen}>
-            <div><strong>Reparos necessários</strong><span>Os valores serão somados ao custo final do aparelho.</span></div>
+            <div><strong>Reparos</strong><span>Os valores serão somados ao custo final do produto.</span></div>
             <div className="repair-accordion-summary"><span>{repairs.filter(repair => repair.descricao.trim()).length} reparos · {formatBRL(repairsTotal)}</span><b aria-hidden="true">{repairsOpen ? "−" : "+"}</b></div>
           </button>
           {repairsOpen && <div className="repair-accordion-content">
@@ -2522,7 +2692,7 @@ function EditProductModal({product, suppliers, onAddSupplier, onSave, onCancel})
             </div>
             <div className="repair-totals"><div><span>Custo base</span><strong>{formatBRL(form.custo)}</strong></div><div><span>Total de reparos</span><strong>+ {formatBRL(repairsTotal)}</strong></div><div className="repair-final-cost"><span>Custo final</span><strong>{formatBRL(finalCost)}</strong></div></div>
           </div>}
-        </div>}
+        </div>
 
         <div className="row" style={{marginTop: 20}}>
           <button className="btn ghost" onClick={onCancel}>Cancelar</button>
@@ -2535,10 +2705,33 @@ function EditProductModal({product, suppliers, onAddSupplier, onSave, onCancel})
   );
 }
 
+const INVENTORY_STATUS_OPTIONS = [
+  {value: "ativo", label: "Ativos"},
+  {value: "inativo", label: "Inativos"},
+  {value: "vendido", label: "Vendidos"},
+  {value: "aguardando", label: "Aguardando aprovação"},
+  {value: "incompleto", label: "A completar"},
+  {value: "sem-estoque", label: "Sem estoque"},
+  {value: "reprovado", label: "Reprovados"},
+  {value: "estornado", label: "Estornados"},
+];
+
+function getInventoryStatus(product) {
+  if (product.statusAprovacao === "estornado") return "estornado";
+  if (product.vendido) return "vendido";
+  if (product.ativo === false) return "inativo";
+  if (product.statusAprovacao === "reprovado") return "reprovado";
+  if (product.statusAprovacao === "aguardando") return "aguardando";
+  if (product.incompleto) return "incompleto";
+  if (product.kind === "acessorio" && Number(product.quantidade || 0) <= 0) return "sem-estoque";
+  return "ativo";
+}
+
 function Estoque({products, usersById, clientes, bandeiras, taxasCartao, defaultCommissionRate, onAddCliente, onDelete, onRestore, onUpdate, onReviewTradeIn, onDirectSale, suppliers, onAddSupplier, reload}) {
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState("");
   const [approvalFilter, setApprovalFilter] = useState(false);
+  const [statusFilters, setStatusFilters] = useState([]);
   const [startDate, setStartDate] = useState(getDefaultStartDate);
   const [endDate, setEndDate] = useState(() => toDateInputValue(new Date()));
   const [toDelete, setToDelete] = useState(null);
@@ -2549,11 +2742,18 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(15);
 
+  const toggleStatusFilter = (status) => {
+    setStatusFilters(current => current.includes(status)
+      ? current.filter(item => item !== status)
+      : [...current, status]);
+  };
+
   const filtered = useMemo(() => {
     return products.filter(p => {
       if (!isWithinDateRange(p.criadoEm || p.created_at, startDate, endDate)) return false;
       if (kindFilter && p.kind !== kindFilter) return false;
       if (approvalFilter && p.statusAprovacao !== "aguardando") return false;
+      if (statusFilters.length > 0 && !statusFilters.includes(getInventoryStatus(p))) return false;
       if (!query.trim()) return true;
       const q = query.toLowerCase();
       const hay = [
@@ -2561,7 +2761,16 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
       ].filter(Boolean).join(" ").toLowerCase();
       return hay.includes(q);
     });
-  }, [products, query, kindFilter, approvalFilter, startDate, endDate]);
+  }, [products, query, kindFilter, approvalFilter, statusFilters, startDate, endDate]);
+
+  const clientAvailableProducts = useMemo(() => filtered.filter(product =>
+    product.ativo !== false
+    && !product.vendido
+    && !product.incompleto
+    && !["aguardando", "reprovado", "estornado"].includes(product.statusAprovacao)
+    && (product.kind !== "acessorio" || Number(product.quantidade) > 0)
+    && Number(product.venda) > 0
+  ), [filtered]);
 
   const productGroups = useMemo(() => {
     const groups = new Map();
@@ -2579,7 +2788,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
   const totalPages = Math.max(1, Math.ceil(productGroups.length / effectivePageSize));
   const currentPage = Math.min(page, totalPages);
   const visibleProductGroups = productGroups.slice((currentPage - 1) * effectivePageSize, currentPage * effectivePageSize);
-  useEffect(() => { setPage(1); }, [query, kindFilter, approvalFilter, startDate, endDate, pageSize]);
+  useEffect(() => { setPage(1); }, [query, kindFilter, approvalFilter, statusFilters, startDate, endDate, pageSize]);
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   const stats = useMemo(() => {
@@ -2601,7 +2810,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
     const lucroPotencial = valorVenda - valorCusto;
     const margemPotencialPct = valorVenda > 0 ? (lucroPotencial / valorVenda) * 100 : 0;
     const percentualComissao = Number(defaultCommissionRate) || 0;
-    const comissao = valorVenda * percentualComissao / 100;
+    const comissao = Math.max(0, lucroPotencial) * percentualComissao / 100;
     const lucroAposComissao = lucroPotencial - comissao;
     return {totalItens, vendidos, aguardando, aCompletar, semEstoque, inativosReprovados, valorCusto, valorVenda, lucroPotencial, margemPotencialPct, percentualComissao, comissao, lucroAposComissao};
   }, [products, defaultCommissionRate, startDate, endDate]);
@@ -2614,7 +2823,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
   };
 
   const handleCopy = async () => {
-    const text = buildClientText(filtered);
+    const text = buildClientText(clientAvailableProducts);
     try {
       await navigator.clipboard.writeText(text);
     } catch (e) {
@@ -2642,7 +2851,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
       <div className="stat-row stock-stat-row stock-value-stats">
         <div className="stat"><div className="sl">Valor em custo</div><div className="sv">{formatBRL(stats.valorCusto)}</div></div>
         <div className="stat"><div className="sl">Valor em venda</div><div className="sv">{formatBRL(stats.valorVenda)}</div></div>
-        <div className="stat"><div className="sl">Comissão ({stats.percentualComissao.toFixed(2)}%)</div><div className="sv">{formatBRL(stats.comissao)}</div></div>
+        <div className="stat"><div className="sl">Comissão sobre lucro ({stats.percentualComissao.toFixed(2)}%)</div><div className="sv">{formatBRL(stats.comissao)}</div></div>
         <div className="stat"><div className="sl">Margem potencial</div><div className="sv">{stats.margemPotencialPct.toFixed(1)}%</div></div>
         <div className="stat"><div className="sl">Lucro potencial</div><div className="sv">{formatBRL(stats.lucroPotencial)}</div></div>
         <div className="stat"><div className="sl">Lucro após comissão</div><div className="sv">{formatBRL(stats.lucroAposComissao)}</div></div>
@@ -2677,6 +2886,26 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
           {KINDS.map(k => <option key={k.key} value={k.key}>{k.label}</option>)}
         </select>
       </div>
+      <fieldset className="inventory-status-filters">
+        <legend>Estado dos produtos</legend>
+        <div className="inventory-status-options">
+          {INVENTORY_STATUS_OPTIONS.map(option => (
+            <label className="inventory-status-option" key={option.value}>
+              <input
+                type="checkbox"
+                checked={statusFilters.includes(option.value)}
+                onChange={() => toggleStatusFilter(option.value)}
+              />
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </div>
+        {statusFilters.length > 0 && (
+          <button className="inventory-status-clear" type="button" onClick={() => setStatusFilters([])}>
+            Limpar filtros
+          </button>
+        )}
+      </fieldset>
       <div className="stock-actions-row">
         <button className={"btn sm" + (approvalFilter ? " primary" : "")} type="button" onClick={() => setApprovalFilter(value => !value)} aria-pressed={approvalFilter}>
           <i className="ti ti-clock-check" aria-hidden="true"></i>Aguardando aprovação
@@ -2684,7 +2913,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
         <button className="btn sm inventory-refresh-btn" type="button" onClick={reload} aria-label="Atualizar estoque" title="Atualizar estoque">
           <RefreshCw size={17} strokeWidth={1.9} aria-hidden="true" />
         </button>
-        <button className="btn sm primary" onClick={handleCopy} disabled={filtered.length === 0}>
+        <button className="btn sm primary" onClick={handleCopy} disabled={clientAvailableProducts.length === 0} title={clientAvailableProducts.length ? `${clientAvailableProducts.length} itens disponíveis para venda` : "Nenhum item disponível para venda"}>
           <i className={"ti " + (copied ? "ti-check" : "ti-copy")} aria-hidden="true"></i>
           {copied ? "Copiado" : "Copiar para cliente"}
         </button>
@@ -2704,7 +2933,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
                 <tr>
                   <th>Produto</th>
                   <th>Categoria</th>
-                  <th>ID / Qtd</th>
+                  <th>IMEI</th>
                   <th>Fornecedor</th>
                   <th>Custo</th>
                   <th>Venda</th>
@@ -2720,7 +2949,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
                   const availableCount = group.items.filter(item => !item.vendido && item.ativo !== false && !item.incompleto && item.statusAprovacao !== "aguardando" && item.statusAprovacao !== "reprovado").length;
                   return <React.Fragment key={group.key}>
                     {grouped && <tr className="stock-group-row" tabIndex={0} onClick={() => setExpandedGroups(value => ({...value, [group.key]: !expanded}))} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setExpandedGroups(value => ({...value, [group.key]: !expanded})); } }} aria-expanded={expanded}>
-                      <td colSpan={7}><div className="stock-group-summary"><span className="stock-group-chevron"><i className={"ti " + (expanded ? "ti-chevron-up" : "ti-chevron-down")} aria-hidden="true"></i></span><div><strong>{productDisplayName(first)}</strong><small>{group.items.length} aparelhos deste modelo</small></div><span className={"badge cat-" + first.kind}>{KIND_META[first.kind].label}</span>{availableCount > 0 && <span className="badge stock-group-available">{availableCount} disponível{availableCount > 1 ? "is" : ""}</span>}{soldCount > 0 && <span className="badge sold-badge">{soldCount} vendido{soldCount > 1 ? "s" : ""}</span>}<span className="stock-group-hint">{expanded ? "Ocultar aparelhos" : "Ver aparelhos"}</span></div></td>
+                      <td colSpan={7}><div className="stock-group-summary"><span className="stock-group-chevron"><i className={"ti " + (expanded ? "ti-chevron-up" : "ti-chevron-down")} aria-hidden="true"></i></span><div><strong>{productDisplayName(first)}</strong><small>{group.items.length} aparelhos deste modelo</small></div><span className={"badge cat-" + first.kind}>{KIND_META[first.kind]?.label || first.kind}</span>{availableCount > 0 && <span className="badge stock-group-available">{availableCount} disponível{availableCount > 1 ? "is" : ""}</span>}{soldCount > 0 && <span className="badge sold-badge">{soldCount} vendido{soldCount > 1 ? "s" : ""}</span>}<span className="stock-group-hint">{expanded ? "Ocultar aparelhos" : "Ver aparelhos"}</span></div></td>
                     </tr>}
                     {(!grouped || expanded) && group.items.map(p => (
                   <tr key={p.id} className={"stock-clickable-row" + (grouped ? " stock-group-child" : "")} tabIndex={0} onClick={() => setSelectedProduct(p)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedProduct(p); } }} aria-label={`Ver detalhes de ${productDisplayName(p)}`}>
@@ -2734,17 +2963,10 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
                       {productSubtitle(p) && <div className="psub">{productSubtitle(p)}</div>}
                     </td>
                     <td>
-                      <span className={"badge cat-" + p.kind}>{KIND_META[p.kind].label}</span>
+                      <span className={"badge cat-" + p.kind}>{KIND_META[p.kind]?.label || p.kind}</span>
                     </td>
-                    <td>
-                      {p.kind === "acessorio" ? (
-                        <span className={"badge " + (Number(p.quantidade) === 0 ? "qty-zero" : Number(p.quantidade) <= 3 ? "qty-low" : "")}>
-                          {p.quantidade} un
-                        </span>
-                      ) : (
-                        <span className="mono">{p.identifier || "—"}</span>
-                      )}
-                    </td>
+                    <td className="mono">{p.kind === "celular" && p.identifier ? formatImei(p.identifier) : ""}</td>
+
                     <td className="mono">{p.fornecedor || "—"}</td>
                     <td className="mono">{formatBRL(p.custo)}</td>
                     <td className="mono">{p.venda ? formatBRL(p.venda) : "—"}</td>
@@ -2824,11 +3046,27 @@ function pdvSearchHay(p) {
   return [productDisplayName(p), p.identifier, p.cor, p.memoria].filter(Boolean).join(" ").toLowerCase();
 }
 
-function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selectedClient, onSelectClient, onClientInputChange, onAddCliente}) {
-  const [form, setForm] = useState({kind: "celular", fabricante: "", modelo: "", memoria: "", cor: "", bateria: "", caixa: false, identifier: "", fornecedor: selectedClient?.nome || "", clienteId: selectedClient?.id || null, valor: "", descricao: "", photos: []});
+function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selectedClient, onSelectClient, onClientInputChange, onAddCliente, tradeIn = null}) {
+  const [form, setForm] = useState(() => ({
+    kind: tradeIn?.kind || "celular",
+    fabricante: tradeIn?.fabricante || "",
+    modelo: tradeIn?.modelo || "",
+    memoria: tradeIn?.memoria || "",
+    cor: tradeIn?.cor || "",
+    bateria: tradeIn?.bateria == null ? "" : String(tradeIn.bateria),
+    caixa: tradeIn?.caixa == null ? false : Boolean(tradeIn.caixa),
+    identifier: tradeIn?.identifier || "",
+    fornecedor: tradeIn?.fornecedor || selectedClient?.nome || "",
+    clienteId: tradeIn?.clienteId || selectedClient?.id || null,
+    valor: tradeIn?.valor == null ? "" : String(tradeIn.valor),
+    descricao: tradeIn?.descricao || "",
+    photos: Array.isArray(tradeIn?.photos) ? tradeIn.photos.map(photo => ({...photo, id: photo.id || photo.key || photo.url || uid()})) : [],
+    reparos: Array.isArray(tradeIn?.reparos) ? tradeIn.reparos.map(repair => ({id: repair.id || uid(), descricao: repair.descricao || "", valor: repair.valor ?? ""})) : [],
+  }));
   const [saving, setSaving] = useState(false);
   const [r2Ready, setR2Ready] = useState(false);
   const [matchedHistory, setMatchedHistory] = useState(null);
+  const [repairsOpen, setRepairsOpen] = useState(false);
   const set = (field, value) => setForm(previous => ({...previous, [field]: value}));
   const kind = form.kind;
 
@@ -2850,7 +3088,7 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
       .filter(product => product.kind === "celular" && String(product.identifier || "").replace(/\D/g, "") === imei)
       .sort((a, b) => new Date(b.criadoEm || 0) - new Date(a.criadoEm || 0))[0];
     setMatchedHistory(previous || null);
-    if (!previous) return;
+    if (!previous || tradeIn) return;
     setForm(current => ({
       ...current,
       fabricante: previous.fabricante || current.fabricante,
@@ -2861,7 +3099,7 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
       caixa: previous.caixa == null ? current.caixa : Boolean(previous.caixa),
       descricao: previous.descricao || current.descricao,
     }));
-  }, [form.identifier, form.kind, historyProducts]);
+  }, [form.identifier, form.kind, historyProducts, tradeIn]);
 
   const selectPhotos = event => {
     const files = Array.from(event.target.files || []).filter(file => file.type.startsWith("image/"));
@@ -2875,18 +3113,30 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
     return {...previous, photos: previous.photos.filter(photo => photo.id !== id)};
   });
 
+  const repairsTotal = useMemo(() => form.reparos.reduce((total, repair) => total + (Number(repair.valor) || 0), 0), [form.reparos]);
+  const finalAcquisitionCost = (Number(form.valor) || 0) + repairsTotal;
+  const addRepair = () => set("reparos", [...form.reparos, {id: uid(), descricao: "", valor: ""}]);
+  const updateRepair = (id, field, value) => set("reparos", form.reparos.map(repair => repair.id === id ? {...repair, [field]: value} : repair));
+  const removeRepair = id => set("reparos", form.reparos.filter(repair => repair.id !== id));
+
   const handleAdd = async () => {
     if (!form.modelo.trim() || !form.valor || Number(form.valor) <= 0) return toast.error(kind === "outro" ? "Informe o nome e o preço do item." : "Informe o modelo e o valor da troca.");
     if (kind !== "outro" && !form.fabricante.trim()) return toast.error("Selecione ou informe o fabricante.");
-    if (kind !== "outro" && !form.clienteId) return toast.error("Pesquise e selecione o cliente da venda.");
+    if (kind !== "outro" && !form.clienteId) return toast.error("Pesquise e selecione o Trading.");
     if (kind === "celular" && !isValidImei(form.identifier)) return toast.error("O IMEI deve conter exatamente 15 dígitos.");
     if (kind === "celular" && form.bateria !== "" && !isValidBattery(form.bateria)) return toast.error("A bateria deve estar entre 1% e 100%.");
+    const invalidRepair = form.reparos.find(repair => Boolean(repair.descricao.trim()) !== (Number(repair.valor) > 0));
+    if (invalidRepair) return toast.error("Preencha o tipo e o valor de cada ajuste, ou remova a linha vazia.");
+    const savedRepairs = form.reparos.filter(repair => repair.descricao.trim() && Number(repair.valor) > 0).map(repair => ({id: repair.id, descricao: repair.descricao.trim(), valor: Number(repair.valor)}));
     setSaving(true);
     try {
       if (kind === "celular") await db.assertImeiAvailable(form.identifier);
-      const id = crypto.randomUUID();
-      const photos = kind !== "outro" && form.photos.length ? await uploadProductPhotos(id, form.photos) : [];
-      await onAdd({...form, id, modelo: form.modelo.trim(), descricao: form.descricao.trim(), identifier: kind === "celular" ? normalizeImeiInput(form.identifier) : kind === "outro" ? "" : form.identifier.trim(), bateria: form.bateria === "" || kind === "outro" ? null : Number(form.bateria), valor: Number(form.valor), photos});
+      const id = tradeIn?.id || crypto.randomUUID();
+      const savedPhotos = form.photos.filter(photo => !photo.file);
+      const pendingPhotos = form.photos.filter(photo => photo.file);
+      const uploadedPhotos = kind !== "outro" && pendingPhotos.length ? await uploadProductPhotos(id, pendingPhotos) : [];
+      const photos = kind === "outro" ? [] : [...savedPhotos, ...uploadedPhotos].slice(0, 3);
+      await onAdd({...form, id, modelo: form.modelo.trim(), descricao: form.descricao.trim(), identifier: kind === "celular" ? normalizeImeiInput(form.identifier) : kind === "outro" ? "" : form.identifier.trim(), bateria: form.bateria === "" || kind === "outro" ? null : Number(form.bateria), valor: Number(form.valor), custoBase: Number(form.valor), reparos: savedRepairs, photos});
     } catch (error) {
       toast.error(productSaveErrorMessage(error));
       setSaving(false);
@@ -2896,8 +3146,8 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
   return (
     <div className="modal-bg" onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
       <div className="modal trade-in-modal">
-        <h3 style={{color: "var(--ink)"}}><i className="ti ti-replace" aria-hidden="true" style={{color: "var(--accent)"}}></i>Aparelho na troca</h3>
-        <p>Informe os dados disponíveis. O aparelho entra no estoque como item de troca e pode ser complementado depois.</p>
+        <h3 style={{color: "var(--ink)"}}><i className="ti ti-replace" aria-hidden="true" style={{color: "var(--accent)"}}></i>{tradeIn ? "Editar aparelho da troca" : "Aparelho na troca"}</h3>
+        <p>{tradeIn ? "Revise os dados informados e salve as alterações." : "Informe os dados disponíveis. O aparelho entra no estoque como item de troca e pode ser complementado depois."}</p>
 
         {kind === "celular" && <div className="trade-imei-first"><Field label="IMEI" required><input autoFocus inputMode="numeric" maxLength={18} value={formatImei(form.identifier)} placeholder="00-000000-000000-0" onChange={e => set("identifier", normalizeImeiInput(e.target.value))} /></Field>{matchedHistory && <div className="trade-history-match"><Check size={15} aria-hidden="true" /><span>Histórico encontrado. Os dados da última passagem foram preenchidos para revisão.</span></div>}</div>}
         <Field label="Tipo de aparelho" span2>
@@ -2926,11 +3176,13 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
           {kind !== "celular" && <Field label="Número de série"><input value={form.identifier} placeholder="Número de série" onChange={e => set("identifier", e.target.value)} /></Field>}
           {kind === "celular" && <Field label="Bateria (%)"><div className="percent-input"><input inputMode="numeric" maxLength={3} value={form.bateria} onChange={e => set("bateria", normalizeBatteryInput(e.target.value))} /><span>%</span></div></Field>}
           <Field label="Caixa"><Toggle2 value={form.caixa} onChange={value => set("caixa", value)} /></Field>
-          <Field label="Fornecedor (cliente da venda)">
+          <Field label="Trading">
             <ClienteCombo
               value={form.fornecedor}
               clientes={clientes}
               onAddCliente={onAddCliente}
+              defaultRole="trading"
+              createTitle="Novo Trading"
               onChange={value => { set("fornecedor", value); set("clienteId", null); onClientInputChange(value); }}
               onSelectExisting={client => {
                 set("fornecedor", client.nome);
@@ -2944,16 +3196,34 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
           </Field>
         </div>
 
+        <div className={"repair-section trade-repair-section" + (repairsOpen ? " open" : "")}>
+          <button type="button" className="repair-accordion-trigger" onClick={() => setRepairsOpen(value => !value)} aria-expanded={repairsOpen}>
+            <div><strong>Ajustes necessários</strong><span>Ex.: troca de tela, bateria ou conector. Os valores entram no custo final.</span></div>
+            <div className="repair-accordion-summary"><span>{form.reparos.filter(repair => repair.descricao.trim()).length} ajustes · {formatBRL(repairsTotal)}</span><b aria-hidden="true">{repairsOpen ? "−" : "+"}</b></div>
+          </button>
+          {repairsOpen && <div className="repair-accordion-content">
+            <div className="repair-actions"><button type="button" className="btn sm" onClick={addRepair}><Plus size={16} aria-hidden="true" />{form.reparos.length ? "Incluir outro ajuste" : "Adicionar ajuste"}</button></div>
+            <div className="repair-list">
+              {form.reparos.length === 0 ? <div className="repair-empty">Nenhum ajuste informado.</div> : form.reparos.map((repair, index) => <div className="repair-row" key={repair.id}>
+                <Field label={"Tipo do ajuste " + (index + 1)}><input type="text" value={repair.descricao} onChange={event => updateRepair(repair.id, "descricao", event.target.value)} placeholder="Ex.: Troca de tela" /></Field>
+                <Field label="Valor"><BRLCurrencyInput value={repair.valor} onChange={value => updateRepair(repair.id, "valor", value)} /></Field>
+                <button type="button" className="icon-btn danger repair-remove" onClick={() => removeRepair(repair.id)} aria-label={"Remover ajuste " + (index + 1)} title="Remover ajuste"><X size={18} aria-hidden="true" /></button>
+              </div>)}
+            </div>
+            <div className="repair-totals"><div><span>Valor do aparelho</span><strong>{formatBRL(form.valor)}</strong></div><div><span>Total dos ajustes</span><strong>+ {formatBRL(repairsTotal)}</strong></div><div className="repair-final-cost"><span>Custo final de aquisição</span><strong>{formatBRL(finalAcquisitionCost)}</strong></div></div>
+          </div>}
+        </div>
+
         <div className="photo-uploader trade-photo-uploader">
           <div className="photo-uploader-head"><div><label>Fotos do aparelho</label><span>{r2Ready ? "Opcional — até 3 imagens" : "Configure o Cloudflare R2 para liberar o envio"}</span></div><label className={"btn sm ghost photo-picker" + (!r2Ready || form.photos.length >= 3 ? " disabled" : "")}><Plus size={16} />Adicionar fotos<input type="file" accept="image/*" multiple disabled={!r2Ready || form.photos.length >= 3} onChange={selectPhotos} /></label></div>
-          {form.photos.length > 0 && <div className="photo-preview-grid">{form.photos.map(photo => <div className="photo-preview" key={photo.id}><img src={photo.preview} alt={photo.name} /><button type="button" className="icon-btn danger" onClick={() => removePhoto(photo.id)}><X size={16} /></button></div>)}</div>}
+          {form.photos.length > 0 && <div className="photo-preview-grid">{form.photos.map(photo => <div className="photo-preview" key={photo.id || photo.key || photo.url}><img src={photo.preview || photo.url} alt={photo.name || "Foto do aparelho"} /><button type="button" className="icon-btn danger" onClick={() => removePhoto(photo.id)}><X size={16} /></button></div>)}</div>}
         </div>
         </React.Fragment>}
 
         <div className="row" style={{marginTop: 20}}>
           <button className="btn ghost" onClick={onCancel}>Cancelar</button>
           <button className="btn primary" onClick={handleAdd} disabled={saving || !form.valor}>
-            {saving ? "Adicionando..." : "Adicionar à venda"}
+            {saving ? "Salvando..." : tradeIn ? "Salvar alterações" : "Adicionar à venda"}
           </button>
         </div>
       </div>
@@ -2961,42 +3231,61 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
   );
 }
 
-function ItemAvulsoModal({onAdd, onCancel}) {
-  const [nome, setNome] = useState("");
-  const [valor, setValor] = useState("");
+function ItemAvulsoModal({onAdd, onCancel, fabricantes = []}) {
+  const [categoria, setCategoria] = useState("produto");
+  const [form, setForm] = useState({kind: "celular", fabricante: "", modelo: "", memoria: "", cor: "", bateria: "", caixa: false, identifier: "", servico: "Troca de tela", titulo: "", descricao: "", valor: ""});
+  const set = (field, value) => setForm(previous => ({...previous, [field]: value}));
+  const isProduct = categoria === "produto";
+  const productKinds = KINDS.filter(kind => kind.key !== "outro");
+  const selectedKind = productKinds.find(kind => kind.key === form.kind);
+  const serviceOptions = ["Troca de tela", "Manutenção", "Troca de bateria", "Reparo de conector", "Outro serviço"];
 
   const handleAdd = () => {
-    if (!nome.trim() || !valor || Number(valor) <= 0) return;
-    onAdd({nome: nome.trim(), valor: Number(valor)});
+    if (!form.valor || Number(form.valor) <= 0) return;
+    if (isProduct && !form.modelo.trim()) return toast.error("Informe o modelo ou nome do produto.");
+    if (isProduct && form.kind === "celular" && form.identifier && !isValidImei(form.identifier)) return toast.error("O IMEI deve conter exatamente 15 dígitos.");
+    if (isProduct && form.kind === "celular" && form.bateria !== "" && !isValidBattery(form.bateria)) return toast.error("A bateria deve estar entre 1% e 100%.");
+    if (!isProduct && !form.titulo.trim()) return toast.error("Informe o título do serviço.");
+    const nome = isProduct ? [form.fabricante, form.modelo].filter(Boolean).join(" ") : form.titulo.trim();
+    const details = isProduct ? [selectedKind?.label, form.memoria, form.cor, form.caixa ? "Com caixa" : "Sem caixa", form.identifier ? `Identificação: ${form.identifier}` : null].filter(Boolean) : ["Serviço", form.servico, form.descricao.trim()].filter(Boolean);
+    const productSnapshot = isProduct ? {kind: form.kind, fabricante: form.fabricante || null, modelo: form.modelo.trim(), memoria: form.memoria || null, cor: form.cor || null, bateria: form.bateria === "" ? null : Number(form.bateria), caixa: Boolean(form.caixa), identifier: form.identifier || null, custo: 0, venda: Number(form.valor) || 0} : null;
+    onAdd({nome, valor: Number(form.valor), kind: isProduct ? form.kind : "servico", sub: details.join(" · "), productSnapshot});
   };
 
   return (
-    <div className="modal-bg" onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div className="modal">
+    <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
+      <div className="modal item-avulso-modal">
         <h3 style={{color: "var(--ink)"}}><i className="ti ti-tag" aria-hidden="true" style={{color: "var(--accent)"}}></i>Item avulso</h3>
-        <p>Para vendas que não passam pelo estoque (serviço, item sem cadastro, etc). Não dá baixa em nenhum produto.</p>
+        <p>Cadastre um produto eletrônico sem estoque ou um serviço prestado nesta venda.</p>
+        <Field label="Categoria" span2><div className="chips"><button type="button" className={"chip" + (isProduct ? " sel" : "")} onClick={() => setCategoria("produto")}>Produto eletrônico</button><button type="button" className={"chip" + (!isProduct ? " sel" : "")} onClick={() => setCategoria("servico")}>Serviço</button></div></Field>
 
-        <Field label="Descrição" required>
-          <input type="text" value={nome} placeholder="Ex: Troca de tela, serviço de manutenção" onChange={e => setNome(e.target.value)} autoFocus />
-        </Field>
-        <div style={{marginTop: 14}}>
-          <Field label="Valor" required>
-            <BRLCurrencyInput value={valor} onChange={setValor} />
-          </Field>
-        </div>
+        {isProduct ? <React.Fragment>
+          <Field label="Tipo de produto" span2><div className="chips">{productKinds.map(kind => <button type="button" key={kind.key} className={"chip" + (form.kind === kind.key ? " sel" : "")} onClick={() => set("kind", kind.key)}>{kind.label}</button>)}</div></Field>
+          <div className="grid" style={{marginTop: 14}}>
+            <Field label="Fabricante"><ChipPicker options={mergeFabricantes([...(FABRICANTES[form.kind] || []), ...fabricantes])} value={form.fabricante} onChange={value => set("fabricante", value)} allowCustom placeholder="outro fabricante" responsiveSelect /></Field>
+            <Field label="Modelo / produto" required><input value={form.modelo} placeholder="Ex.: iPhone 13, caixa JBL" onChange={event => set("modelo", event.target.value)} autoFocus /></Field>
+          </div>
+          <div className="grid g3" style={{marginTop: 14}}>
+            <Field label="Memória"><ChipPicker options={MEMORIAS} value={form.memoria} onChange={value => set("memoria", value)} allowCustom placeholder="outro" responsiveSelect /></Field>
+            <Field label="Cor"><input value={form.cor} placeholder="Ex.: Preto" onChange={event => set("cor", event.target.value)} /></Field>
+            <Field label="Caixa"><Toggle2 value={form.caixa} onChange={value => set("caixa", value)} /></Field>
+            {form.kind === "celular" && <Field label="Bateria (%)"><div className="percent-input"><input inputMode="numeric" maxLength={3} value={form.bateria} onChange={event => set("bateria", normalizeBatteryInput(event.target.value))} /><span>%</span></div></Field>}
+            <Field label={form.kind === "celular" ? "IMEI" : "Número de série"}><input value={form.kind === "celular" ? formatImei(form.identifier) : form.identifier} placeholder={form.kind === "celular" ? "00-000000-000000-0" : "Opcional"} onChange={event => set("identifier", form.kind === "celular" ? normalizeImeiInput(event.target.value) : event.target.value)} /></Field>
+          </div>
+        </React.Fragment> : <React.Fragment>
+          <Field label="Tipo de serviço" span2><div className="chips">{serviceOptions.map(service => <button type="button" key={service} className={"chip" + (form.servico === service ? " sel" : "")} onClick={() => set("servico", service)}>{service}</button>)}</div></Field>
+          <div style={{marginTop: 14}}><Field label="Título do serviço" required><input value={form.titulo} placeholder="Ex.: Reparo do iPhone 13" onChange={event => set("titulo", event.target.value)} autoFocus /></Field></div>
+          <div style={{marginTop: 14}}><Field label="Descrição"><textarea rows="3" value={form.descricao} placeholder="Descreva o serviço realizado" onChange={event => set("descricao", event.target.value)} /></Field></div>
+        </React.Fragment>}
 
-        <div className="row" style={{marginTop: 20}}>
-          <button className="btn ghost" onClick={onCancel}>Cancelar</button>
-          <button className="btn primary" onClick={handleAdd} disabled={!nome.trim() || !valor}>
-            Adicionar à venda
-          </button>
-        </div>
+        <div style={{marginTop: 14}}><Field label="Valor" required><BRLCurrencyInput value={form.valor} onChange={value => set("valor", value)} /></Field></div>
+        <div className="row" style={{marginTop: 20}}><button className="btn ghost" type="button" onClick={onCancel}>Cancelar</button><button className="btn primary" type="button" onClick={handleAdd} disabled={!form.valor}>Adicionar à venda</button></div>
       </div>
     </div>
   );
 }
 
-function ClienteCombo({value, onChange, clientes, onSelectExisting, onAddCliente, allowCreate = true}) {
+function ClienteCombo({value, onChange, clientes, onSelectExisting, onAddCliente, allowCreate = true, defaultRole = "cliente", createTitle = ""}) {
   const [open, setOpen] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const wrapRef = useRef(null);
@@ -3009,7 +3298,7 @@ function ClienteCombo({value, onChange, clientes, onSelectExisting, onAddCliente
 
   const q = value.trim().toLowerCase();
   const matches = clientes
-    .filter(c => c.cliente === true && c.ativo !== false)
+    .filter(c => (c.cliente === true || c.trading === true) && c.ativo !== false)
     .filter(c => {
       if (!q) return true;
       return [c.nome, c.contato, c.email, c.documento]
@@ -3019,7 +3308,7 @@ function ClienteCombo({value, onChange, clientes, onSelectExisting, onAddCliente
     .slice(0, 8);
 
   const createClient = async data => {
-    const client = await onAddCliente({...data, cliente: true});
+    const client = await onAddCliente(data);
     onSelectExisting(client);
     setOpen(false);
     setShowCreate(false);
@@ -3031,7 +3320,7 @@ function ClienteCombo({value, onChange, clientes, onSelectExisting, onAddCliente
         <input
           type="text"
           value={value}
-          placeholder="Buscar cliente já cadastrado..."
+          placeholder={defaultRole === "trading" ? "Buscar Trading ou cliente cadastrado..." : "Buscar cliente já cadastrado..."}
           onChange={e => { onChange(e.target.value); setOpen(true); }}
           onFocus={() => setOpen(true)}
         />
@@ -3050,15 +3339,15 @@ function ClienteCombo({value, onChange, clientes, onSelectExisting, onAddCliente
         {open && matches.length === 0 && (
           <div className="combo-list">
             <div className="combo-item" style={{color: "var(--ink-faint)", cursor: "default"}}>
-              <i className="ti ti-user-search" aria-hidden="true" style={{marginRight: 6}}></i>Nenhum cliente cadastrado encontrado
+              <i className="ti ti-user-search" aria-hidden="true" style={{marginRight: 6}}></i>{defaultRole === "trading" ? "Nenhum Trading ou cliente encontrado" : "Nenhum cliente cadastrado encontrado"}
             </div>
           </div>
         )}
       </div>
-      {allowCreate && <button className="btn supplier-new-btn" type="button" onClick={() => { setOpen(false); setShowCreate(true); }} aria-label="Novo cliente" title="Novo cliente">
+      {allowCreate && <button className="btn supplier-new-btn" type="button" onClick={() => { setOpen(false); setShowCreate(true); }} aria-label={defaultRole === "trading" ? "Novo Trading" : "Novo cliente"} title={defaultRole === "trading" ? "Novo Trading" : "Novo cliente"}>
         <Plus size={20} strokeWidth={2.2} aria-hidden="true" />
       </button>}
-      {allowCreate && showCreate && <PessoaModal defaultRole="cliente" title="Novo cliente" onSave={createClient} onCancel={() => setShowCreate(false)} />}
+      {allowCreate && showCreate && <PessoaModal defaultRole={defaultRole} title={createTitle || (defaultRole === "trading" ? "Novo Trading" : "Novo cliente")} onSave={createClient} onCancel={() => setShowCreate(false)} />}
     </div>
   );
 }
@@ -3092,16 +3381,22 @@ function printSaleReceipt(sale, asPdf) {
 }
 
 function saleFinalTotal(sale) {
+  const items = Array.isArray(sale?.itens) ? sale.itens : [];
+  if (items.length) {
+    return items
+      .filter(item => item.status === "ativo")
+      .reduce((total, item) => total + (Number(item.vendaUnit) || 0) * (Number(item.quantidade) || 1), 0);
+  }
   const payments = Array.isArray(sale?.pagamentos) ? sale.pagamentos : [];
-  if (!payments.length) return Number(sale?.total) || 0;
-  return payments.reduce((total, payment) => total + (Number(payment.valor) || 0), 0);
+  if (payments.length) return payments.reduce((total, payment) => total + (Number(payment.valorBase ?? payment.valor) || 0), 0);
+  return Number(sale?.total) || 0;
 }
 
 function SaleReceiptModal({receipt, companySettings, onClose}) {
   const {sale, tradeIns = []} = receipt;
   const paymentLabel = forma => FORMAS_PAGAMENTO.find(item => item.key === forma)?.label || forma;
   return (
-    <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="modal-bg receipt-print-root" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="modal sale-receipt-modal printable-sale-receipt" role="dialog" aria-modal="true" aria-labelledby="sale-receipt-title">
         <div className="product-details-head">
           <div><h3 id="sale-receipt-title"><i className="ti ti-receipt" aria-hidden="true"></i>Comprovante de compra</h3></div>
@@ -3118,7 +3413,7 @@ function SaleReceiptModal({receipt, companySettings, onClose}) {
           const paidTowardSale = Number(payment.valorBase ?? payment.valor) || 0;
           const cardInterest = Number(payment.valorTaxa) || 0;
           return <div className="receipt-payment-group" key={payment.id || index}>
-            <div className="receipt-row"><span>{paymentLabel(payment.forma)}{payment.bandeira ? ` · ${payment.bandeira} · ${payment.parcelas}x` : ""}{payment.forma === "troca" && tradeIns.map((item, itemIndex) => <small key={item.id || itemIndex}>Modelo: {item.modelo || "Não informado"} · IMEI: {item.identifier ? formatImei(item.identifier) : "Não informado"}</small>)}</span><strong>{formatBRL(paidTowardSale)}</strong></div>
+            <div className={"receipt-row" + (payment.status === "estornado" ? " payment-voided" : "")}><span>{paymentLabel(payment.forma)}{payment.bandeira ? ` · ${payment.bandeira} · ${payment.parcelas}x` : ""}{payment.status === "estornado" && <small>Pagamento estornado{payment.motivoEstorno ? ` · ${payment.motivoEstorno}` : ""}</small>}{payment.forma === "troca" && tradeIns.map((item, itemIndex) => <small key={item.id || itemIndex}>Modelo: {item.modelo || "Não informado"} · IMEI: {item.identifier ? formatImei(item.identifier) : "Não informado"}</small>)}</span><strong>{formatBRL(paidTowardSale)}</strong></div>
             {cardInterest > 0 && <div className="receipt-row receipt-interest-row"><span>Juros do cartão<small>Valor adicional cobrado pela operadora · taxa {payment.taxaPct}%</small></span><strong>+ {formatBRL(cardInterest)}</strong></div>}
           </div>;
         })}</div>
@@ -3208,11 +3503,12 @@ function StockConsultModal({products, cart, onAdd, onClose}) {
   </div>;
 }
 
-function PDV({products, historyProducts = [], clientes, suppliers, companySettings, protecaoPlanos, taxasCartao, bandeiras, onSaleComplete, onAddTradeIn, onAddCliente}) {
+function PDV({products, historyProducts = [], clientes, suppliers, fabricantes = [], companySettings, protecaoPlanos, taxasCartao, bandeiras, onSaleComplete, onAddTradeIn, onAddCliente}) {
   const [query, setQuery] = useState("");
   const [cart, setCart] = useState([]); // [{id, type:'produto'|'protecao', productId?, kind, nome, sub, quantidade, maxQty, vendaUnit}]
   const [tradeIns, setTradeIns] = useState([]); // [{kind, modelo, valor}] adicionados nesta venda
   const [showTradeModal, setShowTradeModal] = useState(false);
+  const [editingTradeIndex, setEditingTradeIndex] = useState(null);
   const [showAvulsoModal, setShowAvulsoModal] = useState(false);
   const [showProtecaoPicker, setShowProtecaoPicker] = useState(false);
   const [showStockConsult, setShowStockConsult] = useState(false);
@@ -3221,7 +3517,7 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
   const [clienteNome, setClienteNome] = useState("");
   const [clienteContato, setClienteContato] = useState("");
 
-  const [pagamentos, setPagamentos] = useState([]); // [{forma, valor, bandeira?, parcelas?}]
+  const [pagamentos, setPagamentos] = useState([]); // [{id, forma, valor, bandeira?, parcelas?}]
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const [saleToast, setSaleToast] = useState(false);
@@ -3288,13 +3584,14 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
     setShowProtecaoPicker(false);
   };
 
-  const addItemAvulso = ({nome, valor}) => {
+  const addItemAvulso = ({nome, valor, kind = "servico", sub = "item avulso · sem estoque", productSnapshot = null}) => {
     setCart(prev => [...prev, {
       id: uid(),
       type: "avulso",
-      kind: "avulso",
+      kind,
       nome,
-      sub: "item avulso · sem estoque",
+      sub,
+      productSnapshot,
       quantidade: 1,
       maxQty: 1,
       vendaUnit: Number(valor) || 0,
@@ -3339,19 +3636,31 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
   const handleAddTradeIn = async (data) => {
     setTradeIns(prev => [...prev, data]);
     setShowTradeModal(false);
+    setEditingTradeIndex(null);
     // ativa automaticamente a forma de pagamento "troca" somando o valor
     setPagamentos(prev => {
       const exists = prev.find(p => p.forma === "troca");
       if (exists) {
         return prev.map(p => p.forma === "troca" ? {...p, valor: (Number(p.valor) || 0) + data.valor} : p);
       }
-      return [...prev, {forma: "troca", valor: data.valor}];
+      return [...prev, {id: uid(), forma: "troca", valor: data.valor}];
     });
+  };
+
+  const handleUpdateTradeIn = async data => {
+    if (editingTradeIndex == null) return;
+    const next = tradeIns.map((item, index) => index === editingTradeIndex ? data : item);
+    const nextTotal = next.reduce((sum, item) => sum + (Number(item.valor) || 0), 0);
+    setTradeIns(next);
+    setPagamentos(previous => previous.map(payment => payment.forma === "troca" ? {...payment, valor: nextTotal} : payment));
+    setShowTradeModal(false);
+    setEditingTradeIndex(null);
   };
 
   const updateTradePayment = value => {
     const target = Math.max(0, Number(value) || 0);
-    setPagamentoField("troca", "valor", value);
+    const tradePayment = pagamentos.find(payment => payment.forma === "troca");
+    if (tradePayment) setPagamentoField(tradePayment.id, "valor", value);
     setTradeIns(previous => {
       if (!previous.length) return previous;
       if (previous.length === 1) return [{...previous[0], valor: target}];
@@ -3369,15 +3678,6 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
     });
   };
 
-  const removeTradeIn = index => {
-    const next = tradeIns.filter((_, itemIndex) => itemIndex !== index);
-    const nextTotal = next.reduce((sum, item) => sum + (Number(item.valor) || 0), 0);
-    setTradeIns(next);
-    setPagamentos(previous => next.length
-      ? previous.map(payment => payment.forma === "troca" ? {...payment, valor: nextTotal} : payment)
-      : previous.filter(payment => payment.forma !== "troca"));
-  };
-
   const clearTradeIns = () => {
     setTradeIns([]);
     setPagamentos(previous => previous.filter(payment => payment.forma !== "troca"));
@@ -3386,47 +3686,45 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
   const total = useMemo(() => cart.reduce((acc, c) => acc + c.vendaUnit * c.quantidade, 0), [cart]);
 
   const taxaDe = (bandeira, parcelas) => Number((taxasCartao[bandeira] || {})[parcelas]) || 0;
-  const totalJurosCartao = useMemo(() => pagamentos.reduce((totalJuros, payment) => {
-    if (payment.forma !== "cartao_credito") return totalJuros;
-    const valorBase = Number(payment.valor) || 0;
-    return totalJuros + valorBase * taxaDe(payment.bandeira, payment.parcelas) / 100;
-  }, 0), [pagamentos, taxasCartao]);
-  const totalFinal = total + totalJurosCartao;
-
   // O saldo da venda é calculado só com os valores "base" (o que cobre o preço
   // da venda). A taxa do cartão é um acréscimo que o cliente paga a mais em
   // cima do que já foi coberto — não entra nessa conta, então nunca aparece
   // como "excesso" só por causa da taxa.
   const pagoBase = useMemo(() => pagamentos.reduce((acc, p) => acc + (Number(p.valor) || 0), 0), [pagamentos]);
   const saldo = total - pagoBase;
+  const podeAdicionarPagamento = total > 0 && saldo > 0.01;
 
-  const temCartaoCredito = pagamentos.some(p => p.forma === "cartao_credito");
-
-  const togglePagamento = (forma) => {
+  const addPagamento = (forma) => {
     if (forma === "troca" && tradeIns.length > 0) {
       const tradeTotal = tradeIns.reduce((sum, item) => sum + (Number(item.valor) || 0), 0);
       setPagamentos(previous => previous.some(payment => payment.forma === "troca")
         ? previous.map(payment => payment.forma === "troca" ? {...payment, valor: tradeTotal} : payment)
-        : [...previous, {forma: "troca", valor: tradeTotal}]);
+        : [...previous, {id: uid(), forma: "troca", valor: tradeTotal}]);
       return;
     }
-    if (forma === "cartao_credito" && temCartaoCredito) {
-      // já tem cartão de crédito na venda — clicar de novo remove (só 1 por venda)
-      setPagamentos(prev => prev.filter(p => p.forma !== "cartao_credito"));
+    if (forma === "troca") {
+      setShowTradeModal(true);
       return;
     }
     setPagamentos(prev => {
-      const exists = prev.find(p => p.forma === forma);
-      if (exists) return prev.filter(p => p.forma !== forma);
-      const sugestao = Math.max(0, total - pagoBase);
-      const base = {forma, valor: sugestao ? sugestao.toFixed(2) : ""};
+      const valorJaInformado = prev.reduce((sum, payment) => sum + (Number(payment.valor) || 0), 0);
+      const sugestao = Math.max(0, total - valorJaInformado);
+      const base = {id: uid(), forma, valor: sugestao ? sugestao.toFixed(2) : ""};
       if (forma === "cartao_credito") return [...prev, {...base, bandeira: bandeiras[0] || "", parcelas: 1}];
       return [...prev, base];
     });
   };
 
-  const setPagamentoField = (forma, field, value) => {
-    setPagamentos(prev => prev.map(p => p.forma === forma ? {...p, [field]: value} : p));
+  const setPagamentoField = (paymentId, field, value) => {
+    setPagamentos(prev => prev.map(p => p.id === paymentId ? {...p, [field]: value} : p));
+  };
+
+  const removePagamento = payment => {
+    if (payment.forma === "troca" && tradeIns.length > 0) {
+      clearTradeIns();
+      return;
+    }
+    setPagamentos(previous => previous.filter(item => item.id !== payment.id));
   };
 
   // Valor da parcela e total que o cliente paga no cartão, com taxa embutida.
@@ -3475,7 +3773,7 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
 
       const {sale, products: updated} = await db.finalizeSale({
         cartItems: cart.filter(c => c.type === "produto").map(c => ({productId: c.productId, kind: c.kind, quantidade: c.quantidade, vendaUnit: c.vendaUnit, nome: c.nome, sub: c.sub})),
-        extras: cart.filter(c => c.type !== "produto").map(c => ({kind: c.kind, quantidade: c.quantidade, vendaUnit: c.vendaUnit, nome: c.nome, sub: c.sub, tipo: c.type})),
+        extras: cart.filter(c => c.type !== "produto").map(c => ({kind: c.kind, quantidade: c.quantidade, vendaUnit: c.vendaUnit, nome: c.nome, sub: c.sub, tipo: c.type, productSnapshot: c.productSnapshot || null})),
         tradeIns,
         cliente: {id: clienteId, nome: clienteNome.trim(), contato: clienteContato.trim(), documento: clientes.find(item => item.id === clienteId)?.documento || ""},
         pagamentos: pagamentos.map(p => {
@@ -3487,7 +3785,7 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
           const valor = Number(p.valor) || 0;
           return {forma: p.forma, valorBase: valor, taxaPct: 0, valorTaxa: 0, valor, bandeira: null, parcelas: null};
         }),
-        total: totalFinal,
+        total,
       });
       setReceipt({sale, tradeIns: tradeIns.map(item => ({...item}))});
       setSaleToast(true);
@@ -3546,26 +3844,13 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
           <button type="button" className="btn sm" onClick={() => setShowProtecaoPicker(true)}>
             <i className="ti ti-shield-check" aria-hidden="true"></i>Proteção Start
           </button>
-          <button type="button" className="btn sm" onClick={() => setShowTradeModal(true)}>
+          <button type="button" className="btn sm" onClick={() => { setEditingTradeIndex(null); setShowTradeModal(true); }}>
             <i className="ti ti-replace" aria-hidden="true"></i>Aparelho na troca
           </button>
           <button type="button" className="btn sm" onClick={() => setShowAvulsoModal(true)}>
             <i className="ti ti-tag" aria-hidden="true"></i>Item avulso
           </button>
         </div>
-        {tradeIns.length > 0 && (
-          <div style={{marginTop: 10}}>
-            {tradeIns.map((t, idx) => (
-              <span key={t.id || idx} className="badge" style={{marginRight: 6, marginBottom: 6, display: "inline-flex", alignItems: "center", gap: 5}}>
-                <i className="ti ti-replace" aria-hidden="true"></i>{KIND_META[t.kind].label}{t.modelo ? " · " + t.modelo : ""} · {formatBRL(t.valor)}
-                <button type="button" onClick={() => removeTradeIn(idx)} aria-label={`Retirar ${t.modelo || "aparelho"} da troca`} title="Retirar aparelho da troca" style={{display: "inline-flex", padding: 1, border: 0, background: "transparent", color: "var(--danger)", cursor: "pointer"}}>
-                  <X size={14} strokeWidth={2.2} aria-hidden="true" />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
         <div className="divider"></div>
 
         <div className="panel-head" style={{marginBottom: 14}}>
@@ -3651,54 +3936,59 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
         </div>
         <div className="pay-grid">
           {FORMAS_PAGAMENTO.map(fp => {
-            const sel = pagamentos.find(p => p.forma === fp.key);
+            const selectedCount = pagamentos.filter(p => p.forma === fp.key).length;
             return (
-              <button type="button" key={fp.key} className={"pay-chip" + (sel ? " sel" : "")} onClick={() => togglePagamento(fp.key)}>
-                <i className={"ti " + fp.icon} aria-hidden="true"></i>{fp.label}
+              <button type="button" key={fp.key} className={"pay-chip" + (selectedCount ? " sel" : "")} onClick={() => addPagamento(fp.key)} disabled={!podeAdicionarPagamento} title={podeAdicionarPagamento ? `Adicionar ${fp.label}` : total <= 0 ? "Adicione produtos antes de escolher o pagamento" : "O valor da venda já está totalmente coberto"}>
+                <i className={"ti " + fp.icon} aria-hidden="true"></i>{fp.label}{selectedCount > 0 && <span className="pay-chip-count">{selectedCount}</span>}
               </button>
             );
           })}
         </div>
+        {pagamentos.length > 0 && <div className="payment-selection-divider"><span>Pagamentos adicionados</span></div>}
         {pagamentos.map(p => {
           const calc = p.forma === "cartao_credito" ? cartaoCalculo(p) : null;
           return (
-            <div key={p.forma}>
+            <div key={p.id}>
               <div className="pay-amount-row">
                 <span className="mono" style={{minWidth: 110}}>{FORMAS_PAGAMENTO.find(f => f.key === p.forma).label}</span>
-                <BRLCurrencyInput value={p.valor} onChange={value => p.forma === "troca" ? updateTradePayment(value) : setPagamentoField(p.forma, "valor", value)} />
-                {p.forma === "troca" && tradeIns.length > 0 && (
-                  <button type="button" className="icon-btn danger" onClick={clearTradeIns} aria-label="Retirar aparelho da troca" title="Retirar aparelho da troca">
-                    <X size={18} strokeWidth={2} aria-hidden="true" />
-                  </button>
-                )}
+                <BRLCurrencyInput value={p.valor} onChange={value => p.forma === "troca" ? updateTradePayment(value) : setPagamentoField(p.id, "valor", value)} />
+                <button type="button" className="icon-btn danger" onClick={() => removePagamento(p)} aria-label={`Remover ${FORMAS_PAGAMENTO.find(f => f.key === p.forma).label}`} title="Remover forma de pagamento">
+                  <X size={18} strokeWidth={2} aria-hidden="true" />
+                </button>
               </div>
               {p.forma === "cartao_credito" && (
                 <React.Fragment>
                   <div className="pay-amount-row" style={{marginTop: 6}}>
-                    <select className="filter-select" style={{flex: 1}} value={p.bandeira} onChange={e => setPagamentoField(p.forma, "bandeira", e.target.value)}>
+                    <select className="filter-select" style={{flex: 1}} value={p.bandeira} onChange={e => setPagamentoField(p.id, "bandeira", e.target.value)}>
                       {bandeiras.map(b => <option key={b} value={b}>{b}</option>)}
                     </select>
-                    <select className="filter-select" style={{flex: 1}} value={p.parcelas} onChange={e => setPagamentoField(p.forma, "parcelas", Number(e.target.value))}>
+                    <select className="filter-select" style={{flex: 1}} value={p.parcelas} onChange={e => setPagamentoField(p.id, "parcelas", Number(e.target.value))}>
                       {Array.from({length: PARCELAS_MAX}, (_, i) => i + 1).map(n => (
                         <option key={n} value={n}>{n}x{taxaDe(p.bandeira, n) ? ` · taxa ${taxaDe(p.bandeira, n)}%` : ""}</option>
                       ))}
                     </select>
                   </div>
                   <div className="cartao-resumo">
+                    <div><span>Juros deste cartão ({calc.taxaPct}%)</span><b>+ {formatBRL(calc.totalComTaxa - (Number(p.valor) || 0))}</b></div>
                     <div><span>Total no cartão (com taxa)</span><b>{formatBRL(calc.totalComTaxa)}</b></div>
                     <div><span>{p.parcelas}x de</span><b>{formatBRL(calc.valorParcela)}</b></div>
                   </div>
                 </React.Fragment>
               )}
+              {p.forma === "troca" && tradeIns.length > 0 && <div className="trade-payment-items">
+                {tradeIns.map((tradeIn, index) => <button type="button" className="trade-payment-item" key={tradeIn.id || index} onClick={() => { setEditingTradeIndex(index); setShowTradeModal(true); }}>
+                  <i className="ti ti-replace" aria-hidden="true"></i>
+                  <span>{KIND_META[tradeIn.kind]?.label || "Aparelho"}{tradeIn.modelo ? ` · ${tradeIn.modelo}` : ""} · {formatBRL(tradeIn.valor)}</span>
+                  <Pencil size={13} aria-hidden="true" />
+                </button>)}
+              </div>}
             </div>
           );
         })}
         {errors.pagamentos && <div className="err" style={{marginTop: 8}}>{errors.pagamentos}</div>}
 
         <div className="cart-summary">
-          <div className="row sale-total"><span>Subtotal dos produtos</span><strong>{formatBRL(total)}</strong></div>
-          {totalJurosCartao > 0 && <div className="row total"><span>Juros do cartão</span><span>+ {formatBRL(totalJurosCartao)}</span></div>}
-          <div className="row sale-total"><span>Total final da venda</span><strong>{formatBRL(totalFinal)}</strong></div>
+          <div className="row sale-total"><span>Total da venda</span><strong>{formatBRL(total)}</strong></div>
           {pagamentos.length > 0 && (
             saldo > 0.01 ? (
               <div className="row total"><span>Total a pagar</span><span>{formatBRL(saldo)}</span></div>
@@ -3706,7 +3996,8 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
               <div className="row total" style={{color: "var(--ok)"}}><span>Saldo</span><span><i className="ti ti-circle-check" aria-hidden="true" style={{marginRight: 4}}></i>Fechado</span></div>
             )
           )}
-        </div>
+        </div>
+
         <div className="actions">
           <button type="button" className="btn primary" disabled={saving} onClick={handleFinalize} style={{flex: 1, justifyContent: "center"}}>
             {saving ? <React.Fragment><i className="ti ti-loader-2" aria-hidden="true"></i>Finalizando...</React.Fragment> : <React.Fragment><i className="ti ti-check" aria-hidden="true"></i>Finalizar venda</React.Fragment>}
@@ -3727,13 +4018,14 @@ function PDV({products, historyProducts = [], clientes, suppliers, companySettin
           onSelectClient={handleSelectExistingClient}
           onClientInputChange={handleClienteNomeChange}
           onAddCliente={onAddCliente}
-          onAdd={handleAddTradeIn}
-          onCancel={() => setShowTradeModal(false)}
+          tradeIn={editingTradeIndex == null ? null : tradeIns[editingTradeIndex]}
+          onAdd={editingTradeIndex == null ? handleAddTradeIn : handleUpdateTradeIn}
+          onCancel={() => { setShowTradeModal(false); setEditingTradeIndex(null); }}
         />
       )}
 
       {showAvulsoModal && (
-        <ItemAvulsoModal onAdd={addItemAvulso} onCancel={() => setShowAvulsoModal(false)} />
+        <ItemAvulsoModal fabricantes={fabricantes} onAdd={addItemAvulso} onCancel={() => setShowAvulsoModal(false)} />
       )}
 
       {showProtecaoPicker && <ProtecaoStartModal planos={protecaoPlanos} onSelect={addProtecao} onClose={() => setShowProtecaoPicker(false)} />}
@@ -3842,26 +4134,35 @@ function TrocaItemModal({item, products, onConfirm, onCancel}) {
 }
 
 function SaleDetailsModal({sale, tradeIns, usersById, clientDocument, companySettings, onClose, onEstornarVenda}) {
+  const [preparingVoid, setPreparingVoid] = useState(false);
   const user = usersById[sale.criadoPor];
   const userName = user ? `${user.full_name || user.email}${user.slug ? ` (@${user.slug})` : ""}` : "Não identificado";
+  const voidUser = usersById[sale.estornadoPor];
+  const voidUserName = voidUser ? `${voidUser.full_name || voidUser.email}${voidUser.slug ? ` (@${voidUser.slug})` : ""}` : sale.estornadoPor ? "Usuário não identificado" : "";
   const paymentLabel = forma => FORMAS_PAGAMENTO.find(item => item.key === forma)?.label || forma;
+  const handleVoidClick = () => {
+    if (preparingVoid) return;
+    setPreparingVoid(true);
+    // Aguarda o navegador desenhar o estado de carregamento antes de abrir o próximo modal.
+    window.setTimeout(() => onEstornarVenda(), 80);
+  };
   return (
     <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="modal sale-details-modal printable-sale-receipt" role="dialog" aria-modal="true" aria-labelledby="sale-details-title">
         <div className="product-details-head"><div><h3 id="sale-details-title"><i className="ti ti-receipt" aria-hidden="true"></i>Detalhes da venda</h3><p>{sale.cliente?.nome || "Cliente não identificado"}</p></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Fechar" title="Fechar"><X size={20} aria-hidden="true" /></button></div>
         {companySettings?.nomeFantasia && <div className="receipt-company">{companySettings.logoData && <img className="receipt-company-logo" src={companySettings.logoData} alt={`Logo ${companySettings.nomeFantasia}`} />}<strong>{companySettings.nomeFantasia}</strong>{companySettings.razaoSocial && <span>{companySettings.razaoSocial}</span>}<span>{[formatCpfCnpj(companySettings.documento), companySettings.telefone, companySettings.email].filter(value => value && value !== "Não informado").join(" · ")}</span>{companySettings.endereco && <span>{companySettings.endereco}</span>}</div>}
-        <div className="receipt-meta"><div><span>Identificação</span><strong>{sale.id}</strong></div><div><span>Data</span><strong>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</strong></div><div><span>Cliente</span><strong>{sale.cliente?.nome || "Não informado"}<small>CPF/CNPJ: {formatCpfCnpj(clientDocument || sale.cliente?.documento)}</small>{sale.cliente?.contato && <small>Contato: {sale.cliente.contato}</small>}</strong></div><div><span>Usuário responsável</span><strong>{userName}</strong></div><div><span>Status</span><strong>{sale.status === "ativo" ? "Ativa" : sale.status === "estornada" ? "Estornada" : "Parcialmente estornada"}</strong></div></div>
-        <div className="receipt-section"><h4><ShoppingBag size={15} aria-hidden="true" />Itens da venda</h4>{sale.itens.map(item => <div className={"receipt-row sale-detail-item" + (item.status !== "ativo" ? " inactive" : "")} key={item.id}><span>{item.quantidade}x {item.nome}<small>{[item.sub, item.kind === "celular" && item.productSnapshot?.identifier ? `IMEI: ${formatImei(item.productSnapshot.identifier)}` : null, item.status !== "ativo" ? `${item.status}${item.motivoEstorno ? `: ${item.motivoEstorno}` : ""}` : null].filter(Boolean).join(" · ")}</small></span><strong>{formatBRL(item.vendaUnit * item.quantidade)}</strong></div>)}</div>
+        <div className="receipt-meta"><div><span>Identificação</span><strong>{sale.id}</strong></div><div><span>Data</span><strong>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</strong></div><div><span>Cliente</span><strong>{sale.cliente?.nome || "Não informado"}<small>CPF/CNPJ: {formatCpfCnpj(clientDocument || sale.cliente?.documento)}</small>{sale.cliente?.contato && <small>Contato: {sale.cliente.contato}</small>}</strong></div><div><span>Usuário responsável</span><strong>{userName}</strong></div><div><span>Status</span><strong>{sale.status === "ativo" ? "Ativa" : sale.status === "estornada" ? "Estornada" : "Parcialmente estornada"}{sale.status === "estornada" && voidUserName && <small>Estornada por: {voidUserName}</small>}</strong></div></div>
+        <div className="receipt-section"><h4><ShoppingBag size={15} aria-hidden="true" />Itens da venda</h4>{sale.itens.map(item => <div className={"receipt-row sale-detail-item" + (item.status !== "ativo" ? " inactive" : "")} key={item.id}><span>{item.quantidade}x {item.nome}<small>{[item.sub, item.kind === "celular" && item.productSnapshot?.identifier ? `IMEI: ${formatImei(item.productSnapshot.identifier)}` : null, item.status !== "ativo" ? `${item.status}${item.motivoEstorno ? `: ${item.motivoEstorno}` : ""}${item.estornadoPor && usersById[item.estornadoPor] ? ` · por ${usersById[item.estornadoPor].full_name || usersById[item.estornadoPor].email}` : ""}` : null].filter(Boolean).join(" · ")}</small></span><strong>{formatBRL(item.vendaUnit * item.quantidade)}</strong></div>)}</div>
         <div className="receipt-section"><h4><CreditCard size={15} aria-hidden="true" />Pagamentos</h4>{sale.pagamentos.map((payment, index) => {
           const paidTowardSale = Number(payment.valorBase ?? payment.valor) || 0;
           const cardInterest = Number(payment.valorTaxa) || 0;
           return <div className="receipt-payment-group" key={payment.id || index}>
-            <div className="receipt-row"><span>{paymentLabel(payment.forma)}{payment.bandeira ? ` · ${payment.bandeira} · ${payment.parcelas}x` : ""}{payment.forma === "troca" && tradeIns.map(item => <small key={item.id}>Modelo: {item.modelo || "Não informado"} · IMEI: {item.identifier ? formatImei(item.identifier) : "Não informado"}</small>)}</span><strong>{formatBRL(paidTowardSale)}</strong></div>
+            <div className={"receipt-row" + (payment.status === "estornado" ? " payment-voided" : "")}><span>{paymentLabel(payment.forma)}{payment.bandeira ? ` · ${payment.bandeira} · ${payment.parcelas}x` : ""}{payment.status === "estornado" && <small>Pagamento estornado{payment.motivoEstorno ? ` · ${payment.motivoEstorno}` : ""}{payment.estornadoPor && usersById[payment.estornadoPor] ? ` · por ${usersById[payment.estornadoPor].full_name || usersById[payment.estornadoPor].email}` : ""}</small>}{payment.forma === "troca" && tradeIns.map(item => <small key={item.id}>Modelo: {item.modelo || "Não informado"} · IMEI: {item.identifier ? formatImei(item.identifier) : "Não informado"}</small>)}</span><strong>{formatBRL(paidTowardSale)}</strong></div>
             {cardInterest > 0 && <div className="receipt-row receipt-interest-row"><span>Juros do cartão<small>Valor adicional cobrado pela operadora · taxa {payment.taxaPct}%</small></span><strong>+ {formatBRL(cardInterest)}</strong></div>}
           </div>;
         })}</div>
         <div className="receipt-total"><span><BadgeDollarSign size={18} aria-hidden="true" />Total da venda</span><strong>{formatBRL(saleFinalTotal(sale))}</strong></div>
-        <div className="sale-details-footer receipt-print-actions"><button className="btn receipt-pdf-button" type="button" onClick={() => printSaleReceipt(sale, true)}><FileDown size={17} aria-hidden="true" />Gerar PDF</button><button className="btn receipt-print-button" type="button" onClick={() => printSaleReceipt(sale, false)}><Printer size={17} aria-hidden="true" />Imprimir</button>{sale.status !== "estornada" && <button className="btn sale-void-button" type="button" onClick={onEstornarVenda}><RotateCcw size={17} aria-hidden="true" />Estornar venda</button>}</div>
+        <div className={"sale-details-footer receipt-print-actions" + (preparingVoid ? " is-processing" : "")}><button className="btn receipt-pdf-button" type="button" onClick={() => printSaleReceipt(sale, true)} disabled={preparingVoid}><FileDown size={17} aria-hidden="true" />Gerar PDF</button><button className="btn receipt-print-button" type="button" onClick={() => printSaleReceipt(sale, false)} disabled={preparingVoid}><Printer size={17} aria-hidden="true" />Imprimir</button>{sale.status !== "estornada" && <button className="btn sale-void-button" type="button" onClick={handleVoidClick} disabled={preparingVoid} aria-busy={preparingVoid}>{preparingVoid ? <><RotateCcw className="button-wait-spinner" size={17} aria-hidden="true" />Aguarde...</> : <><RotateCcw size={17} aria-hidden="true" />Estornar venda</>}</button>}</div>
       </div>
     </div>
   );
@@ -3895,9 +4196,7 @@ function Historico({sales, products, clientes, usersById, companySettings, reloa
   // Total "líquido" da venda: soma só os itens ainda ativos (descontando estornos)
   const totalAtivo = (s) => {
     const activeBase = s.itens.filter(i => i.status === "ativo").reduce((acc, i) => acc + i.vendaUnit * i.quantidade, 0);
-    const originalBase = s.itens.reduce((acc, i) => acc + i.vendaUnit * i.quantidade, 0);
-    const interest = (s.pagamentos || []).reduce((acc, payment) => acc + (Number(payment.valorTaxa) || 0), 0);
-    return activeBase + (originalBase > 0 ? interest * activeBase / originalBase : 0);
+    return activeBase;
   };
 
   const stats = useMemo(() => {
@@ -3993,7 +4292,7 @@ function Historico({sales, products, clientes, usersById, companySettings, reloa
       {estornoTarget && (
         <EstornoVendaModal sale={estornoTarget} onConfirm={handleEstorno} onCancel={() => setEstornoTarget(null)} />
       )}
-      {selectedSale && <SaleDetailsModal sale={selectedSale} tradeIns={products.filter(product => product.vendaOrigemId === selectedSale.id)} usersById={usersById} clientDocument={clientes.find(client => client.id === selectedSale.cliente?.id)?.documento || ""} companySettings={companySettings} onClose={() => setSelectedSale(null)} onEstornarVenda={() => setEstornoTarget(selectedSale)} />}
+      {selectedSale && <SaleDetailsModal sale={selectedSale} tradeIns={products.filter(product => product.vendaOrigemId === selectedSale.id)} usersById={usersById} clientDocument={clientes.find(client => client.id === selectedSale.cliente?.id)?.documento || ""} companySettings={companySettings} onClose={() => setSelectedSale(null)} onEstornarVenda={() => { setEstornoTarget(selectedSale); setSelectedSale(null); }} />}
     </div>
   );
 }
@@ -4191,7 +4490,7 @@ function ProductHistoryPanel({products = [], sales = [], usersById = {}}) {
       ["Saúde da bateria", product.bateria == null ? null : `${product.bateria}%`],
       ["Com caixa", product.caixa == null ? null : product.caixa ? "Sim" : "Não"],
       ["Categoria", product.categoria],
-      ["Fornecedor", product.fornecedor],
+      [product.vendaOrigemId ? "Trading" : "Fornecedor", product.trading || product.fornecedor],
       ["Custo de entrada", formatBRL(product.custo)],
       ["Venda prevista", product.venda ? formatBRL(product.venda) : null],
       ["Observações", product.descricao],
@@ -4210,6 +4509,23 @@ function ProductHistoryPanel({products = [], sales = [], usersById = {}}) {
         userId: product.criado_por,
       };
     });
+    passages.forEach(product => {
+      if (product.statusAprovacao !== "estornado" || !product.estornadoEm) return;
+      const originSale = sales.find(sale => sale.id === product.vendaOrigemId);
+      events.push({
+        id: `trade-return-${product.id}`,
+        at: product.estornadoEm,
+        type: "return",
+        title: "Estorno da troca — devolvido ao cliente",
+        detail: [
+          product.motivoEstorno || "Aparelho recebido como pagamento devolvido após o estorno",
+          originSale ? `venda ${originSale.id}` : null,
+          originSale?.cliente?.nome ? `cliente ${originSale.cliente.nome}` : null,
+        ].filter(Boolean).join(" · "),
+        facts: snapshotFacts(product),
+        userId: product.estornadoPor || originSale?.estornadoPor || null,
+      });
+    });
     sales.forEach(sale => sale.itens.filter(sameProduct).forEach(item => {
       events.push({
         id: `sold-${item.id}`,
@@ -4226,7 +4542,7 @@ function ProductHistoryPanel({products = [], sales = [], usersById = {}}) {
         type: "return",
         title: "Venda estornada — retornou ao estoque",
         detail: item.motivoEstorno || `Estorno da venda ${sale.id}`,
-        userId: item.atualizadoPor || sale.atualizadoPor,
+        userId: item.estornadoPor || sale.estornadoPor || item.atualizadoPor || sale.atualizadoPor,
       });
       if (item.status === "trocado" && item.trocadoEm) events.push({
         id: `exchange-${item.id}`,
@@ -4237,7 +4553,7 @@ function ProductHistoryPanel({products = [], sales = [], usersById = {}}) {
         userId: item.atualizadoPor || sale.atualizadoPor,
       });
     }));
-    const currentStatus = selected.vendido ? "Vendido" : selected.ativo === false ? "Inativo" : selected.statusAprovacao === "aguardando" ? "Aguardando aprovação" : selected.incompleto ? "A completar" : "Disponível para venda";
+    const currentStatus = selected.statusAprovacao === "estornado" ? "Estornado e devolvido ao cliente" : selected.vendido ? "Vendido" : selected.ativo === false ? "Inativo" : selected.statusAprovacao === "aguardando" ? "Aguardando aprovação" : selected.incompleto ? "A completar" : "Disponível para venda";
     events.push({id: `current-${selected.id}`, at: null, type: "current", title: "Situação atual", detail: currentStatus});
     return events.sort((a, b) => {
       if (!a.at) return 1;
@@ -4376,6 +4692,7 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
         <div className="grid g2">
           <Field label="Nome fantasia" required><input value={company.nomeFantasia || ""} placeholder="Ex.: Loja Celular" onChange={event => setCompany(previous => ({...previous, nomeFantasia: event.target.value}))} /></Field>
           <Field label="Razão social"><input value={company.razaoSocial || ""} placeholder="Ex.: Loja Celular LTDA" onChange={event => setCompany(previous => ({...previous, razaoSocial: event.target.value}))} /></Field>
+          <Field label="Slogan (opcional)" span2><input value={company.slogan || ""} placeholder="Ex.: Sua loja de tecnologia" onChange={event => setCompany(previous => ({...previous, slogan: event.target.value}))} /></Field>
           <Field label="CPF / CNPJ"><input inputMode="numeric" maxLength={18} value={formatCpfCnpjInput(company.documento)} placeholder="000.000.000-00 ou 00.000.000/0000-00" onChange={event => setCompany(previous => ({...previous, documento: formatCpfCnpjInput(event.target.value)}))} /></Field>
           <Field label="Telefone"><input inputMode="tel" maxLength={15} value={formatPhoneInput(company.telefone)} placeholder="(00) 00000-0000" onChange={event => setCompany(previous => ({...previous, telefone: formatPhoneInput(event.target.value)}))} /></Field>
           <Field label="E-mail"><input type="email" value={company.email || ""} placeholder="contato@empresa.com" onChange={event => setCompany(previous => ({...previous, email: event.target.value}))} /></Field>
@@ -4531,11 +4848,16 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
   );
 }
 
-function commissionableSaleTotal(sale) {
-  if (!Array.isArray(sale.itens)) return sale.status === "estornada" ? 0 : Number(sale.total) || 0;
+function commissionableSaleProfit(sale) {
+  if (!Array.isArray(sale.itens)) return 0;
   return sale.itens
     .filter(item => item.status === "ativo")
-    .reduce((total, item) => total + (Number(item.vendaUnit) || 0) * (Number(item.quantidade) || 0), 0);
+    .reduce((total, item) => {
+      const quantidade = Number(item.quantidade) || 0;
+      const receita = (Number(item.vendaUnit) || 0) * quantidade;
+      const custo = item.productSnapshot ? (Number(item.productSnapshot.custo) || 0) * quantidade : 0;
+      return total + Math.max(0, receita - custo);
+    }, 0);
 }
 
 const DEFAULT_COMMISSION_RATE = 5;
@@ -4583,14 +4905,14 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
     .filter(user => !selectedUserId || user.id === selectedUserId)
     .map(user => {
       const userSales = periodSales.filter(sale => sale.criadoPor === user.id);
-      const base = userSales.reduce((total, sale) => total + commissionableSaleTotal(sale), 0);
+      const base = userSales.reduce((total, sale) => total + commissionableSaleProfit(sale), 0);
       const rate = Number(draftRates[user.id] ?? draftDefaultRate) || 0;
       return {user, salesCount: userSales.length, base, rate, commission: base * rate / 100};
     }), [sellers, selectedUserId, periodSales, draftRates, draftDefaultRate]);
 
   const sellerRateRows = useMemo(() => sellers.map(user => {
     const userSales = commissionPeriodSales.filter(sale => sale.criadoPor === user.id);
-    const base = userSales.reduce((total, sale) => total + commissionableSaleTotal(sale), 0);
+    const base = userSales.reduce((total, sale) => total + commissionableSaleProfit(sale), 0);
     const rate = Number(draftRates[user.id] ?? draftDefaultRate) || 0;
     return {user, salesCount: userSales.length, base, rate, commission: base * rate / 100};
   }), [sellers, commissionPeriodSales, draftRates, draftDefaultRate]);
@@ -4652,7 +4974,7 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
   return (
     <div className="commissions-page">
       <div className="panel commissions-panel">
-        <div className="panel-head"><div><h2><i className="ti ti-percentage" aria-hidden="true"></i>Comissoes por vendedor</h2><span className="sub">calculadas sobre os itens ativos das vendas</span></div><button className="btn receipt-pdf-button" type="button" onClick={printCommissionReport}><FileDown size={17} aria-hidden="true" />Gerar PDF</button></div>
+        <div className="panel-head"><div><h2><i className="ti ti-percentage" aria-hidden="true"></i>Comissoes por vendedor</h2><span className="sub">calculadas sobre o lucro dos itens ativos das vendas</span></div><button className="btn receipt-pdf-button" type="button" onClick={printCommissionReport}><FileDown size={17} aria-hidden="true" />Gerar PDF</button></div>
         <div className="commissions-filters">
           <Field label="Percentual geral"><div className="commission-rate"><input type="number" min="0" max="100" step="0.01" value={draftDefaultRate} onChange={event => { const next = event.target.value; setDraftDefaultRate(next); setDraftRates(previous => Object.fromEntries(sellers.map(user => [user.id, rates[user.id] ?? next ?? previous[user.id]]))); }} /><span>%</span></div></Field>
           <Field label="Data inicial"><input type="date" value={startDate} onChange={event => setStartDate(event.target.value)} /></Field>
@@ -4661,7 +4983,7 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
         </div>
         <div className="commission-totals">
           <div><span>Vendas no periodo</span><strong>{totals.sales}</strong></div>
-          <div><span>Base comissionavel</span><strong>{formatBRL(totals.base)}</strong></div>
+          <div><span>Lucro comissionavel</span><strong>{formatBRL(totals.base)}</strong></div>
           <div><span>Total de comissoes</span><strong>{formatBRL(totals.commission)}</strong></div>
         </div>
         {error && <div className="auth-alert danger">{error}</div>}
@@ -4674,8 +4996,8 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
             <button type="button" className="commission-seller-trigger" onClick={() => setExpandedSellers(previous => ({...previous, [group.user.id]: !previous[group.user.id]}))} aria-expanded={expanded}>
               <div><strong>{group.user.full_name || group.user.email}</strong><span>{group.user.email}</span></div><div className="commission-seller-summary"><span>{group.salesCount} {group.salesCount === 1 ? "venda" : "vendas"}</span><span>Base: <b>{formatBRL(group.base)}</b></span><span>Comissao: <b>{formatBRL(group.commission)}</b></span><i className={`ti ti-chevron-${expanded ? "up" : "down"}`} aria-hidden="true"></i></div>
             </button>
-            {expanded && <div className="commission-table-wrap"><table className="stock commission-table commission-sales-table"><thead><tr><th>Data</th><th>Cliente</th><th>Status</th><th>Base</th><th>Comissao</th></tr></thead><tbody>
-              {group.sales.map(sale => { const base = commissionableSaleTotal(sale); const rate = Number(draftRates[sale.criadoPor] ?? draftDefaultRate) || 0; return <tr key={sale.id} className="stock-clickable-row" tabIndex={0} onClick={() => setSelectedSale(sale)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSale(sale); } }}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{sale.status === "parcialmente_estornada" ? "Parcialmente estornada" : "Ativa"}</td><td>{formatBRL(base)}</td><td className="commission-value">{formatBRL(base * rate / 100)}</td></tr>; })}
+            {expanded && <div className="commission-table-wrap"><table className="stock commission-table commission-sales-table"><thead><tr><th>Data</th><th>Cliente</th><th>Status</th><th>Lucro</th><th>Comissao</th></tr></thead><tbody>
+              {group.sales.map(sale => { const base = commissionableSaleProfit(sale); const rate = Number(draftRates[sale.criadoPor] ?? draftDefaultRate) || 0; return <tr key={sale.id} className="stock-clickable-row" tabIndex={0} onClick={() => setSelectedSale(sale)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSale(sale); } }}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{sale.status === "parcialmente_estornada" ? "Parcialmente estornada" : "Ativa"}</td><td>{formatBRL(base)}</td><td className="commission-value">{formatBRL(base * rate / 100)}</td></tr>; })}
               {group.sales.length === 0 && <tr><td colSpan="5" className="empty-cell">Nenhuma venda deste vendedor no periodo.</td></tr>}
             </tbody></table></div>}
           </div>; })}
@@ -4687,10 +5009,10 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
           {companySettings?.logoData && <img src={companySettings.logoData} alt="" />}
           <div><h1>Relatorio de comissoes</h1><strong>{companySettings?.nomeFantasia || "Loja de Celular"}</strong><p>Periodo: {startDate ? new Date(`${startDate}T12:00:00`).toLocaleDateString("pt-BR") : "inicio"} a {endDate ? new Date(`${endDate}T12:00:00`).toLocaleDateString("pt-BR") : "hoje"}</p></div>
         </header>
-        <div className="commission-print-totals"><div><span>Vendas</span><strong>{totals.sales}</strong></div><div><span>Base comissionavel</span><strong>{formatBRL(totals.base)}</strong></div><div><span>Total de comissoes</span><strong>{formatBRL(totals.commission)}</strong></div></div>
+        <div className="commission-print-totals"><div><span>Vendas</span><strong>{totals.sales}</strong></div><div><span>Lucro comissionavel</span><strong>{formatBRL(totals.base)}</strong></div><div><span>Total de comissoes</span><strong>{formatBRL(totals.commission)}</strong></div></div>
         {sellerSaleGroups.map(group => <section className="commission-print-seller" key={group.user.id}>
           <h2><span>{group.user.full_name || group.user.email}</span><small>{group.user.email} · {group.rate.toFixed(2)}%</small></h2>
-          <table><thead><tr><th>Data</th><th>Cliente</th><th>Base</th><th>Comissao</th></tr></thead><tbody>{group.sales.map(sale => { const base = commissionableSaleTotal(sale); return <tr key={sale.id}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{formatBRL(base)}</td><td>{formatBRL(base * group.rate / 100)}</td></tr>; })}</tbody><tfoot><tr><td colSpan="2">Total do vendedor</td><td>{formatBRL(group.base)}</td><td>{formatBRL(group.commission)}</td></tr></tfoot></table>
+          <table><thead><tr><th>Data</th><th>Cliente</th><th>Lucro</th><th>Comissao</th></tr></thead><tbody>{group.sales.map(sale => { const base = commissionableSaleProfit(sale); return <tr key={sale.id}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{formatBRL(base)}</td><td>{formatBRL(base * group.rate / 100)}</td></tr>; })}</tbody><tfoot><tr><td colSpan="2">Total do vendedor</td><td>{formatBRL(group.base)}</td><td>{formatBRL(group.commission)}</td></tr></tfoot></table>
         </section>)}
         <footer>Gerado em {new Date().toLocaleString("pt-BR")}</footer>
       </section>
@@ -4713,12 +5035,16 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
 }
 
 function LoginScreen({onAuthenticated, recoveryMode = false, onRecoveryComplete, onCancelRecovery, initialMessage = ""}) {
-  const [mode, setMode] = useState(() => {
+  const [mode, setMode] = useState(() => {
+
     if (recoveryMode) return "reset";
     if (typeof window === "undefined") return "login";
-    const preferred = window.localStorage.getItem("estoque_auth_mode");
-    window.localStorage.removeItem("estoque_auth_mode");
-    return preferred === "register" ? "register" : "login";
+    const preferred = window.localStorage.getItem("estoque_auth_mode");
+
+    window.localStorage.removeItem("estoque_auth_mode");
+
+    return preferred === "register" ? "register" : "login";
+
   });
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -4731,11 +5057,11 @@ function LoginScreen({onAuthenticated, recoveryMode = false, onRecoveryComplete,
   const [allowRegistration, setAllowRegistration] = useState(false);
   const [checkingRegistration, setCheckingRegistration] = useState(true);
   const [companyBrand, setCompanyBrand] = useState(() => {
-    if (typeof window === "undefined") return {nomeFantasia: "", logoData: ""};
+    if (typeof window === "undefined") return {nomeFantasia: "", slogan: "", logoData: ""};
     try {
       return JSON.parse(window.localStorage.getItem(COMPANY_BRAND_CACHE_KEY)) || {nomeFantasia: "", logoData: ""};
     } catch (_error) {
-      return {nomeFantasia: "", logoData: ""};
+      return {nomeFantasia: "", slogan: "", logoData: ""};
     }
   });
 
@@ -4749,11 +5075,11 @@ function LoginScreen({onAuthenticated, recoveryMode = false, onRecoveryComplete,
     const loadCompanyBrand = async () => {
       const {data, error: companyError} = await supabaseClient
         .from("configuracoes_empresa")
-        .select("nome_fantasia, logo_data")
+        .select("nome_fantasia, slogan, logo_data")
         .eq("id", 1)
         .maybeSingle();
       if (!active || companyError || !data) return;
-      const brand = {nomeFantasia: data.nome_fantasia || "", logoData: data.logo_data || ""};
+      const brand = {nomeFantasia: data.nome_fantasia || "", slogan: data.slogan || "", logoData: data.logo_data || ""};
       setCompanyBrand(brand);
       try { window.localStorage.setItem(COMPANY_BRAND_CACHE_KEY, JSON.stringify(brand)); } catch (_error) {}
     };
@@ -4865,6 +5191,7 @@ function LoginScreen({onAuthenticated, recoveryMode = false, onRecoveryComplete,
           </div>
           <div className="brand-text">
             <h1>{companyBrand.nomeFantasia || "Cadastro de Estoque"}</h1>
+            {companyBrand.slogan?.trim() && <p>{companyBrand.slogan}</p>}
           </div>
         </div>
 
@@ -5159,9 +5486,12 @@ function UserManagement({currentProfile}) {
       )}
     </div>
   );
-}
-/* =========================================================================
-   APP
+}
+
+/* =========================================================================
+
+   APP
+
    ========================================================================= */
 
 function EstoqueApp() {
@@ -5169,6 +5499,7 @@ function EstoqueApp() {
   const [products, setProducts] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [acessorioCategorias, setAcessorioCategorias] = useState([]);
+  const [productTypes, setProductTypes] = useState(() => KINDS.filter(item => item.key !== "outro"));
   const [fabricantes, setFabricantes] = useState(FABRICANTES_PADRAO);
   const [sales, setSales] = useState([]);
   const [clientes, setClientes] = useState([]);
@@ -5177,11 +5508,14 @@ function EstoqueApp() {
   const [taxasCartao, setTaxasCartao] = useState({});
   const [commissionRates, setCommissionRates] = useState({});
   const [defaultCommissionRate, setDefaultCommissionRate] = useState(DEFAULT_COMMISSION_RATE);
-  const [companySettings, setCompanySettings] = useState({nomeFantasia: "", razaoSocial: "", documento: "", telefone: "", email: "", endereco: ""});
+  const [companySettings, setCompanySettings] = useState({nomeFantasia: "", slogan: "", razaoSocial: "", documento: "", telefone: "", email: "", endereco: ""});
   const [userProfiles, setUserProfiles] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [authLoading, setAuthLoading] = useState(true);
-  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const [authLoading, setAuthLoading] = useState(true);
+
+  const [session, setSession] = useState(null);
+
   const [profile, setProfile] = useState(null);
   const [authError, setAuthError] = useState("");
   const [recoveringPassword, setRecoveringPassword] = useState(false);
@@ -5200,8 +5534,8 @@ function EstoqueApp() {
   }, []);
 
   const load = async () => {
-    const [p, s, c, fabs, v, cli, planos, band, taxas, users, company, commissions] = await Promise.all([
-      db.listProducts(), db.listSuppliers(), db.listAcessorioCategorias(), db.listFabricantes(), db.listSales(),
+    const [p, s, c, fabs, types, v, cli, planos, band, taxas, users, company, commissions] = await Promise.all([
+      db.listProducts(), db.listSuppliers(), db.listAcessorioCategorias(), db.listFabricantes(), db.listProductTypes(), db.listSales(),
       db.listClientes(), db.listProtecaoPlanos(), db.listBandeiras(), db.getTaxasCartao(), db.listUserProfiles(), db.getCompanySettings(),
       normalizeRole(activeProfile?.role) === "admin" ? db.listCommissionRates() : Promise.resolve({rates: {}, defaultRate: DEFAULT_COMMISSION_RATE}),
     ]);
@@ -5209,6 +5543,7 @@ function EstoqueApp() {
     setSuppliers(s);
     setAcessorioCategorias(c);
     setFabricantes(mergeFabricantes(fabs, p));
+    setProductTypes(syncProductTypes(types));
     setSales(v);
     setClientes(cli);
     setProtecaoPlanos(planos);
@@ -5219,7 +5554,7 @@ function EstoqueApp() {
     setCommissionRates(commissions.rates || {});
     setDefaultCommissionRate(commissions.defaultRate ?? DEFAULT_COMMISSION_RATE);
     try {
-      window.localStorage.setItem(COMPANY_BRAND_CACHE_KEY, JSON.stringify({nomeFantasia: company.nomeFantasia || "", logoData: company.logoData || ""}));
+      window.localStorage.setItem(COMPANY_BRAND_CACHE_KEY, JSON.stringify({nomeFantasia: company.nomeFantasia || "", slogan: company.slogan || "", logoData: company.logoData || ""}));
     } catch (_error) {}
     setLoading(false);
   };
@@ -5375,6 +5710,13 @@ function EstoqueApp() {
     setAcessorioCategorias(list);
   };
 
+  const handleAddProductType = async (name) => {
+    const list = await db.addProductType(name);
+    const synced = syncProductTypes(list);
+    setProductTypes([...synced]);
+    return synced;
+  };
+
   const handleAddFabricante = async (name) => {
     const list = await db.addFabricante(name);
     setFabricantes(mergeFabricantes(list, products));
@@ -5444,7 +5786,7 @@ function EstoqueApp() {
       tradeIns: [],
       cliente: {id: customer.id || null, nome: customer.nome, contato: customer.contato || "", documento: customer.documento || ""},
       pagamentos: [{forma: payment.forma, valorBase: Number(price), taxaPct: feeRate, valorTaxa: feeValue, valor: Number(price) + feeValue, bandeira: payment.bandeira || null, parcelas: payment.parcelas || null}],
-      total: Number(price) + feeValue,
+      total: Number(price),
     });
     await handleSaleComplete(updatedProducts);
     toast.success("Venda direta efetuada com sucesso.");
@@ -5461,7 +5803,7 @@ function EstoqueApp() {
     const saved = await db.saveCompanySettings(data);
     setCompanySettings(saved);
     try {
-      window.localStorage.setItem(COMPANY_BRAND_CACHE_KEY, JSON.stringify({nomeFantasia: saved.nomeFantasia || "", logoData: saved.logoData || ""}));
+      window.localStorage.setItem(COMPANY_BRAND_CACHE_KEY, JSON.stringify({nomeFantasia: saved.nomeFantasia || "", slogan: saved.slogan || "", logoData: saved.logoData || ""}));
     } catch (_error) {}
     toast.success("Dados da empresa salvos.");
   };
@@ -5488,15 +5830,24 @@ function EstoqueApp() {
 
   const handleAddCliente = async (data) => {
     const existing = clientes.find(c => c.nome.toLowerCase() === data.nome.toLowerCase() && (c.contato || "") === (data.contato || ""));
+    const requestedRoles = {
+      cliente: data.cliente !== false,
+      fornecedor: Boolean(data.fornecedor),
+      trading: Boolean(data.trading),
+    };
     if (existing) {
-      if (!existing.cliente) {
-        const updated = await db.updateCliente(existing.id, {cliente: true});
+      const rolePatch = {};
+      if (requestedRoles.cliente && !existing.cliente) rolePatch.cliente = true;
+      if (requestedRoles.fornecedor && !existing.fornecedor) rolePatch.fornecedor = true;
+      if (requestedRoles.trading && !existing.trading) rolePatch.trading = true;
+      if (Object.keys(rolePatch).length > 0) {
+        const updated = await db.updateCliente(existing.id, rolePatch);
         setClientes(prev => prev.map(c => c.id === existing.id ? updated : c));
         return updated;
       }
       return existing;
     }
-    const cliente = await db.addCliente({...data, cliente: true});
+    const cliente = await db.addCliente({...data, ...requestedRoles});
     setClientes(prev => [cliente, ...prev]);
     return cliente;
   };
@@ -5551,8 +5902,10 @@ function EstoqueApp() {
     const {bandeiras: list, taxas} = await db.renameBandeira(oldName, newName);
     setBandeiras(list);
     setTaxasCartao(taxas);
-  };
-
+  };
+
+
+
   const handleAuthenticated = async (nextSession) => {
     setAuthLoading(true);
     setAuthError("");
@@ -5672,7 +6025,7 @@ function EstoqueApp() {
 
   return (
     <div className="app">
-      <AppHeader brandName={companySettings.nomeFantasia} logoData={companySettings.logoData} usingSupabase={usingSupabase} connectionLabel={connectionLabel} connectionTitle={connectionTitle} userName={profile?.full_name || session.user.email} userEmail={session.user.email} roleLabel={ROLE_LABELS[currentRole]} onSignOut={handleSignOut} />
+      <AppHeader brandName={companySettings.nomeFantasia} slogan={companySettings.slogan} logoData={companySettings.logoData} usingSupabase={usingSupabase} connectionLabel={connectionLabel} connectionTitle={connectionTitle} userName={profile?.full_name || session.user.email} userEmail={session.user.email} onSignOut={handleSignOut} />
 
       <ResponsiveNavigation
         allowedTabs={allowedTabs}
@@ -5695,7 +6048,7 @@ function EstoqueApp() {
         )}
         {allowedTabs.includes("clientes") && (
           <button className={tab === "clientes" ? "active" : ""} onClick={() => setTab("clientes")}>
-            <i className="ti ti-address-book" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Clientes e fornecedores<span className="n">{clientes.length}</span>
+            <i className="ti ti-address-book" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Pessoas<span className="n">{clientes.length}</span>
           </button>
         )}
         {allowedTabs.includes("pdv") && (
@@ -5713,11 +6066,16 @@ function EstoqueApp() {
             <i className="ti ti-percentage" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Comissoes
           </button>
         )}
-        {usingSupabase && allowedTabs.includes("usuarios") && (
-          <button className={tab === "usuarios" ? "active" : ""} onClick={() => setTab("usuarios")}>
-            <i className="ti ti-users" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Usuários
-          </button>
-        )}
+        {usingSupabase && allowedTabs.includes("usuarios") && (
+
+          <button className={tab === "usuarios" ? "active" : ""} onClick={() => setTab("usuarios")}>
+
+            <i className="ti ti-users" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Usuários
+
+          </button>
+
+        )}
+
         {allowedTabs.includes("config") && (
           <button className={tab === "config" ? "active" : ""} onClick={() => setTab("config")}>
             <i className="ti ti-settings" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Configurações
@@ -5735,6 +6093,8 @@ function EstoqueApp() {
             onAddAcessorioCategoria={handleAddAcessorioCategoria}
             fabricantes={fabricantes}
             products={products}
+            productTypes={productTypes}
+            onAddProductType={handleAddProductType}
             onAddFabricante={handleAddFabricante}
             canUploadPhotos={usingSupabase}
           /></CadastroPage>
@@ -5762,11 +6122,13 @@ function EstoqueApp() {
         <PdvPage><PDV
             products={products.filter(product => product.ativo !== false)}
             historyProducts={products}
-            clientes={clientes.filter(c => c.cliente && c.ativo !== false)}
+            clientes={clientes.filter(c => (c.cliente || c.trading) && c.ativo !== false)}
+            fabricantes={fabricantes}
             suppliers={suppliers.filter(supplier => supplier.ativo !== false)}
             protecaoPlanos={protecaoPlanos}
             taxasCartao={taxasCartao}
             bandeiras={bandeiras}
+            companySettings={companySettings}
             onSaleComplete={handleSaleComplete}
             onAddTradeIn={handleAddTradeIn}
             onAddCliente={handleAddCliente}
@@ -5809,7 +6171,8 @@ function EstoqueApp() {
 
     </div>
   );
-}
+}
+
 export default EstoqueApp;
 
 
