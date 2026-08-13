@@ -1556,7 +1556,7 @@ function newUserForm() {
 }
 
 const ROLE_TABS = {
-  admin: ["cadastro", "estoque", "clientes", "pdv", "historico", "comissoes", "fabricantes", "usuarios", "config"],
+  admin: ["dash", "cadastro", "estoque", "clientes", "pdv", "historico", "comissoes", "fabricantes", "usuarios", "config"],
   vendedor: ["clientes", "pdv"],
 };
 
@@ -2006,6 +2006,7 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
       setTypeError(error?.message || "Não foi possível adicionar o tipo.");
     }
   };
+
   useEffect(() => {
     if (!typeMenuOpen) return;
     const closeMenu = event => {
@@ -2014,6 +2015,7 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
     document.addEventListener("mousedown", closeMenu);
     return () => document.removeEventListener("mousedown", closeMenu);
   }, [typeMenuOpen]);
+
 
   useEffect(() => {
     let active = true;
@@ -2098,7 +2100,15 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
     setErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
-    const productId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : uid();
+    const normalizeGroupValue = value => String(value || "").trim().toLocaleLowerCase("pt-BR");
+    const groupedAccessory = form.kind === "acessorio" ? products.find(product =>
+      product.kind === "acessorio"
+      && product.ativo !== false
+      && normalizeGroupValue(product.nome) === normalizeGroupValue(form.nome)
+      && normalizeGroupValue(product.categoria) === normalizeGroupValue(form.categoria)
+      && normalizeGroupValue(product.fornecedor) === normalizeGroupValue(form.fornecedor)
+    ) : null;
+    const productId = groupedAccessory?.id || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : uid());
     setErrors(prev => {
       const next = {...prev};
       delete next.submit;
@@ -2132,16 +2142,16 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
         caixa: isAcessorio ? null : form.caixa,
         identifier: isAcessorio ? null : form.identifier,
         fornecedor: form.fornecedor || null,
-        quantidade: isAcessorio ? Number(form.quantidade) : null,
+        quantidade: isAcessorio ? Number(groupedAccessory?.quantidade || 0) + Number(form.quantidade) : null,
         custo: Number(form.custo),
         venda: Number(form.venda),
         categoria: form.categoria,
-        photos: uploadedPhotos,
+        photos: groupedAccessory ? [...(groupedAccessory.photos || []), ...uploadedPhotos] : uploadedPhotos,
         criadoEm: new Date().toISOString(),
       };
 
       const savedProduct = await withTimeout(
-        db.saveProduct(product),
+        groupedAccessory ? db.updateProduct(groupedAccessory.id, product) : db.saveProduct(product),
         20000,
         "O Supabase atingiu o tempo limite ao cadastrar o produto."
       );
@@ -2372,6 +2382,7 @@ function ProductDetailsModal({product, usersById, clientes = [], bandeiras = [],
   const [directSaleSaving, setDirectSaleSaving] = useState(false);
   const [directSaleError, setDirectSaleError] = useState("");
   const directSaleRef = useRef(null);
+
   useEffect(() => {
     if (!directSaleOpen) return;
     window.requestAnimationFrame(() => directSaleRef.current?.scrollIntoView({behavior: "smooth", block: "nearest"}));
@@ -2788,7 +2799,9 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
   const totalPages = Math.max(1, Math.ceil(productGroups.length / effectivePageSize));
   const currentPage = Math.min(page, totalPages);
   const visibleProductGroups = productGroups.slice((currentPage - 1) * effectivePageSize, currentPage * effectivePageSize);
+
   useEffect(() => { setPage(1); }, [query, kindFilter, approvalFilter, statusFilters, startDate, endDate, pageSize]);
+
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   const stats = useMemo(() => {
@@ -2933,7 +2946,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
                 <tr>
                   <th>Produto</th>
                   <th>Categoria</th>
-                  <th>IMEI</th>
+                  <th>Identificação / quantidade</th>
                   <th>Fornecedor</th>
                   <th>Custo</th>
                   <th>Venda</th>
@@ -2965,7 +2978,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
                     <td>
                       <span className={"badge cat-" + p.kind}>{KIND_META[p.kind]?.label || p.kind}</span>
                     </td>
-                    <td className="mono">{p.kind === "celular" && p.identifier ? formatImei(p.identifier) : ""}</td>
+                    <td className="mono">{p.kind === "acessorio" ? `${Number(p.quantidade || 0)} un.` : p.kind === "celular" && p.identifier ? formatImei(p.identifier) : p.identifier || "—"}</td>
 
                     <td className="mono">{p.fornecedor || "—"}</td>
                     <td className="mono">{formatBRL(p.custo)}</td>
@@ -3072,11 +3085,13 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
 
   const tradeKinds = KINDS.filter(k => k.key !== "acessorio");
 
+
   useEffect(() => {
     let active = true;
     fetch(PRODUCT_PHOTO_UPLOAD_URL).then(response => response.json()).then(payload => { if (active) setR2Ready(Boolean(payload.enabled)); }).catch(() => {});
     return () => { active = false; form.photos.forEach(photo => photo.preview && URL.revokeObjectURL(photo.preview)); };
   }, []);
+
 
   useEffect(() => {
     const imei = String(form.identifier || "").replace(/\D/g, "");
@@ -3289,6 +3304,7 @@ function ClienteCombo({value, onChange, clientes, onSelectExisting, onAddCliente
   const [open, setOpen] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const wrapRef = useRef(null);
+
 
   useEffect(() => {
     const onClick = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
@@ -4190,7 +4206,9 @@ function Historico({sales, products, clientes, usersById, companySettings, reloa
   const totalPages = Math.max(1, Math.ceil(filtered.length / effectivePageSize));
   const currentPage = Math.min(page, totalPages);
   const visibleSales = filtered.slice((currentPage - 1) * effectivePageSize, currentPage * effectivePageSize);
+
   useEffect(() => { setPage(1); }, [query, startDate, endDate, pageSize]);
+
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   // Total "líquido" da venda: soma só os itens ainda ativos (descontando estornos)
@@ -4491,7 +4509,10 @@ function ProductHistoryPanel({products = [], sales = [], usersById = {}}) {
       ["Com caixa", product.caixa == null ? null : product.caixa ? "Sim" : "Não"],
       ["Categoria", product.categoria],
       [product.vendaOrigemId ? "Trading" : "Fornecedor", product.trading || product.fornecedor],
-      ["Custo de entrada", formatBRL(product.custo)],
+      ["Custo de entrada", formatBRL(product.reparos?.length ? product.custoBase : product.custo)],
+      ...(product.reparos || []).map((repair, index) => [`Reparo ${index + 1} — ${repair.descricao || "Sem descrição"}`, formatBRL(repair.valor)]),
+      ["Total de reparos", product.reparos?.length ? formatBRL(product.reparos.reduce((total, repair) => total + (Number(repair.valor) || 0), 0)) : null],
+      ["Custo final após reparos", product.reparos?.length ? formatBRL(product.custo) : null],
       ["Venda prevista", product.venda ? formatBRL(product.venda) : null],
       ["Observações", product.descricao],
     ].filter(([, value]) => value !== null && value !== undefined && value !== "");
@@ -4510,6 +4531,19 @@ function ProductHistoryPanel({products = [], sales = [], usersById = {}}) {
       };
     });
     passages.forEach(product => {
+      const repairs = Array.isArray(product.reparos) ? product.reparos.filter(repair => repair.descricao || Number(repair.valor) > 0) : [];
+      if (!repairs.length) return;
+      const totalRepairs = repairs.reduce((total, repair) => total + (Number(repair.valor) || 0), 0);
+      events.push({
+        id: `repairs-${product.id}`,
+        at: product.updated_at || product.criadoEm,
+        type: "repair",
+        title: `${repairs.length} ${repairs.length === 1 ? "reparo registrado" : "reparos registrados"}`,
+        detail: `Custo base ${formatBRL(product.custoBase)} · reparos ${formatBRL(totalRepairs)} · custo final ${formatBRL(product.custo)}`,
+        facts: repairs.map((repair, index) => [`${index + 1}. ${repair.descricao || "Reparo sem descrição"}`, formatBRL(repair.valor)]),
+        userId: product.atualizado_por || product.criado_por || null,
+      });
+    });    passages.forEach(product => {
       if (product.statusAprovacao !== "estornado" || !product.estornadoEm) return;
       const originSale = sales.find(sale => sale.id === product.vendaOrigemId);
       events.push({
@@ -4877,7 +4911,11 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
   const [expandedSellers, setExpandedSellers] = useState({});
   const [selectedSale, setSelectedSale] = useState(null);
   const [estornoTarget, setEstornoTarget] = useState(null);
+  const [consolidatedPage, setConsolidatedPage] = useState(1);
   const SELLERS_PER_PAGE = 10;
+  const CONSOLIDATED_PER_PAGE = 5;
+  const ADVANCES_PER_PAGE = 10;
+
 
   const commissionPeriodSales = useMemo(() => sales.filter(sale =>
     sale.criadoPor
@@ -4895,6 +4933,7 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
     });
     return [...usersById.values()].sort((a, b) => String(a.full_name || a.email).localeCompare(String(b.full_name || b.email), "pt-BR"));
   }, [sales, users]);
+
 
   useEffect(() => {
     setDraftDefaultRate(defaultRate);
@@ -4925,6 +4964,7 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
   const sellerCurrentPage = Math.min(sellerPage, sellerTotalPages);
   const visibleSellerRows = filteredSellerRows.slice((sellerCurrentPage - 1) * SELLERS_PER_PAGE, sellerCurrentPage * SELLERS_PER_PAGE);
   useEffect(() => setSellerPage(1), [sellerQuery, showRatesModal]);
+
   useEffect(() => { if (sellerPage > sellerTotalPages) setSellerPage(sellerTotalPages); }, [sellerPage, sellerTotalPages]);
 
   const totals = summaries.reduce((acc, row) => ({
@@ -4936,6 +4976,11 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
     ...summary,
     sales: periodSales.filter(sale => sale.criadoPor === summary.user.id),
   })), [summaries, periodSales]);
+  const consolidatedTotalPages = Math.max(1, Math.ceil(sellerSaleGroups.length / CONSOLIDATED_PER_PAGE));
+  const consolidatedCurrentPage = Math.min(consolidatedPage, consolidatedTotalPages);
+  const visibleSellerSaleGroups = sellerSaleGroups.slice((consolidatedCurrentPage - 1) * CONSOLIDATED_PER_PAGE, consolidatedCurrentPage * CONSOLIDATED_PER_PAGE);
+  useEffect(() => setConsolidatedPage(1), [selectedUserId, startDate, endDate]);
+  useEffect(() => { if (consolidatedPage > consolidatedTotalPages) setConsolidatedPage(consolidatedTotalPages); }, [consolidatedPage, consolidatedTotalPages]);
 
   const saveRates = async () => {
     setSaving(true);
@@ -4982,9 +5027,9 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
           <Field label="Vendedor"><select value={selectedUserId} onChange={event => setSelectedUserId(event.target.value)}><option value="">Todos</option>{sellers.map(user => <option key={user.id} value={user.id}>{user.full_name || user.email}</option>)}</select></Field>
         </div>
         <div className="commission-totals">
-          <div><span>Vendas no periodo</span><strong>{totals.sales}</strong></div>
-          <div><span>Lucro comissionavel</span><strong>{formatBRL(totals.base)}</strong></div>
-          <div><span>Total de comissoes</span><strong>{formatBRL(totals.commission)}</strong></div>
+          <div><span>Vendas no período</span><strong>{totals.sales}</strong></div>
+          <div><span>Lucro comissionável</span><strong>{formatBRL(totals.base)}</strong></div>
+          <div><span>Total de comissões</span><strong>{formatBRL(totals.commission)}</strong></div>
         </div>
         {error && <div className="auth-alert danger">{error}</div>}
         {message && <div className="auth-alert ok">{message}</div>}
@@ -4992,9 +5037,9 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
       </div>
       <div className="panel commissions-panel"><div className="panel-head"><div><h2><i className="ti ti-receipt" aria-hidden="true"></i>Vendas consideradas</h2><span className="sub">clique no vendedor e depois na venda para ver todos os detalhes</span></div></div>
         <div className="commission-seller-groups">
-          {sellerSaleGroups.map(group => { const expanded = Boolean(expandedSellers[group.user.id]); return <div className="commission-seller-group" key={group.user.id}>
+          {visibleSellerSaleGroups.map(group => { const expanded = Boolean(expandedSellers[group.user.id]); return <div className="commission-seller-group" key={group.user.id}>
             <button type="button" className="commission-seller-trigger" onClick={() => setExpandedSellers(previous => ({...previous, [group.user.id]: !previous[group.user.id]}))} aria-expanded={expanded}>
-              <div><strong>{group.user.full_name || group.user.email}</strong><span>{group.user.email}</span></div><div className="commission-seller-summary"><span>{group.salesCount} {group.salesCount === 1 ? "venda" : "vendas"}</span><span>Base: <b>{formatBRL(group.base)}</b></span><span>Comissao: <b>{formatBRL(group.commission)}</b></span><i className={`ti ti-chevron-${expanded ? "up" : "down"}`} aria-hidden="true"></i></div>
+              <div><strong>{group.user.full_name || group.user.email}</strong><span>{group.user.email}</span></div><div className="commission-seller-summary"><span>{group.salesCount} {group.salesCount === 1 ? "venda" : "vendas"}</span><span>Base: <b>{formatBRL(group.base)}</b></span><span>Comissão: <b>{formatBRL(group.commission)}</b></span><i className={`ti ti-chevron-${expanded ? "up" : "down"}`} aria-hidden="true"></i></div>
             </button>
             {expanded && <div className="commission-table-wrap"><table className="stock commission-table commission-sales-table"><thead><tr><th>Data</th><th>Cliente</th><th>Status</th><th>Lucro</th><th>Comissao</th></tr></thead><tbody>
               {group.sales.map(sale => { const base = commissionableSaleProfit(sale); const rate = Number(draftRates[sale.criadoPor] ?? draftDefaultRate) || 0; return <tr key={sale.id} className="stock-clickable-row" tabIndex={0} onClick={() => setSelectedSale(sale)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSale(sale); } }}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{sale.status === "parcialmente_estornada" ? "Parcialmente estornada" : "Ativa"}</td><td>{formatBRL(base)}</td><td className="commission-value">{formatBRL(base * rate / 100)}</td></tr>; })}
@@ -5003,6 +5048,7 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
           </div>; })}
           {sellerSaleGroups.length === 0 && <div className="empty-cell">Nenhuma venda no periodo selecionado.</div>}
         </div>
+        {sellerSaleGroups.length > CONSOLIDATED_PER_PAGE && <div className="list-pagination"><button type="button" className="btn sm" disabled={consolidatedCurrentPage === 1} onClick={() => setConsolidatedPage(page => Math.max(1, page - 1))}><i className="ti ti-chevron-left" aria-hidden="true"></i>Anterior</button><span>Página {consolidatedCurrentPage} de {consolidatedTotalPages} · {sellerSaleGroups.length} vendedores</span><button type="button" className="btn sm" disabled={consolidatedCurrentPage === consolidatedTotalPages} onClick={() => setConsolidatedPage(page => Math.min(consolidatedTotalPages, page + 1))}>Próxima<i className="ti ti-chevron-right" aria-hidden="true"></i></button></div>}
       </div>
       <section className="commission-print-report" aria-hidden="true">
         <header>
@@ -5065,9 +5111,11 @@ function LoginScreen({onAuthenticated, recoveryMode = false, onRecoveryComplete,
     }
   });
 
+
   useEffect(() => {
     if (recoveryMode) setMode("reset");
   }, [recoveryMode]);
+
 
   useEffect(() => {
     if (!SUPABASE_READY) return undefined;
@@ -5086,6 +5134,7 @@ function LoginScreen({onAuthenticated, recoveryMode = false, onRecoveryComplete,
     loadCompanyBrand();
     return () => { active = false; };
   }, []);
+
 
   useEffect(() => {
     let active = true;
@@ -5346,6 +5395,7 @@ function UserManagement({currentProfile}) {
     setLoading(false);
   };
 
+
   useEffect(() => { loadUsers(); }, [currentProfile?.role]);
 
   const updateRole = async (userId, role) => {
@@ -5526,6 +5576,50 @@ function EstoqueApp() {
       : "";
   });
 
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (normalizeRole(profile?.role) !== "admin") {
+      window.localStorage.removeItem("dashboard_report_data_v1");
+      return;
+    }
+    window.localStorage.setItem("dashboard_report_data_v1", JSON.stringify({
+      sales, products, taxasCartao, bandeiras, companySettings, userProfiles, commissionRates, defaultCommissionRate, generatedAt: new Date().toISOString(),
+    }));
+  }, [sales, products, taxasCartao, bandeiras, companySettings, userProfiles, commissionRates, defaultCommissionRate, profile?.role]);
+  useEffect(() => {
+    if (normalizeRole(profile?.role) !== "admin" || !session?.access_token) return;
+    const execute = async payload => {
+      const method = payload.action === "create" ? "POST" : payload.action === "delete" ? "DELETE" : "GET";
+      const query = payload.action === "list" ? `?${new URLSearchParams(payload.filters || {})}` : payload.action === "delete" ? `?id=${encodeURIComponent(payload.id)}` : "";
+      const requestWithCurrentSession = async forceRefresh => {
+        const authResult = forceRefresh ? await supabaseClient.auth.refreshSession() : await supabaseClient.auth.getSession();
+        const token = authResult.data?.session?.access_token;
+        if (!token) throw new Error("Sua sessão expirou. Entre novamente no sistema.");
+        return fetch(`/api/financial-movements${query}`, {method, headers: {Authorization: `Bearer ${token}`, ...(method === "POST" ? {"Content-Type": "application/json"} : {})}, body: method === "POST" ? JSON.stringify(payload.data) : undefined});
+      };
+      let response = await requestWithCurrentSession(false);
+      if (response.status === 401) response = await requestWithCurrentSession(true);
+      let contentType = response.headers.get("content-type") || "";
+      if (!contentType.includes("application/json") && response.status >= 500) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        response = await requestWithCurrentSession(true);
+        contentType = response.headers.get("content-type") || "";
+      }
+      const raw = await response.text();
+      if (!contentType.includes("application/json")) throw new Error("O servidor financeiro está sendo atualizado. Recarregue a página e tente novamente.");
+      let data;
+      try { data = raw ? JSON.parse(raw) : {}; } catch { throw new Error("O servidor financeiro devolveu uma resposta inválida."); }
+      if (!response.ok) throw new Error(data.error || "Falha na operação financeira.");
+      return data;
+    };
+    const answer = async (payload, send) => { try { send({type: "dashboard-finance-response", requestId: payload.requestId, data: await execute(payload)}); } catch (error) { send({type: "dashboard-finance-response", requestId: payload.requestId, error: error.message}); } };
+    const onMessage = event => { if (event.origin !== window.location.origin || event.data?.type !== "dashboard-finance-request") return; answer(event.data, result => event.source?.postMessage(result, event.origin)); };
+    const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("dashboard-finance") : null;
+    if (channel) channel.onmessage = event => { if (event.data?.type === "dashboard-finance-request") answer(event.data, result => channel.postMessage(result)); };
+    window.addEventListener("message", onMessage);
+    return () => { window.removeEventListener("message", onMessage); channel?.close(); };
+  }, [profile?.role, session?.access_token]);
   useEffect(() => {
     const url = new URL(window.location.href);
     if (url.searchParams.get("password_reset") !== "success") return;
@@ -5607,6 +5701,7 @@ function EstoqueApp() {
       setAuthLoading(false);
     }
   };
+
 
   useEffect(() => {
     let mounted = true;
@@ -5691,6 +5786,7 @@ function EstoqueApp() {
       listener?.subscription?.unsubscribe();
     };
   }, []);
+
   useEffect(() => {
     if (!profile?.role || canUseTab(profile.role, tab)) return;
     setTab(allowedTabsForRole(profile.role)[0]);
@@ -5734,7 +5830,7 @@ function EstoqueApp() {
   };
 
   const handleSaved = (product) => {
-    setProducts(prev => [product, ...prev]);
+    setProducts(prev => prev.some(item => item.id === product.id) ? prev.map(item => item.id === product.id ? product : item) : [product, ...prev]);
   };
 
   const handleDelete = async (id) => {
@@ -5958,6 +6054,7 @@ function EstoqueApp() {
     }
   };
 
+
   useEffect(() => {
     if (!session?.user?.id) return;
     const userId = session.user.id;
@@ -6036,6 +6133,11 @@ function EstoqueApp() {
       />
 
       <div className="nav legacy-nav" aria-hidden="true">
+        {allowedTabs.includes("dash") && (
+          <button className={tab === "dash" ? "active" : ""} onClick={() => setTab("dash")}>
+            <i className="ti ti-chart-dashboard" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Dashboard
+          </button>
+        )}
         {allowedTabs.includes("cadastro") && (
           <button className={tab === "cadastro" ? "active" : ""} onClick={() => setTab("cadastro")}>
             <i className="ti ti-plus" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Produto
@@ -6083,7 +6185,11 @@ function EstoqueApp() {
         )}
       </div>
 
-      {loading ? null : tab === "cadastro" ? (
+      {loading ? null : tab === "dash" ? (
+        <section className="dashboard-embed" aria-label="Dashboard financeiro">
+          <iframe src="/dash/index.html?compact=1" title="Resumo do Dashboard" loading="eager" scrolling="no" />
+        </section>
+      ) : tab === "cadastro" ? (
         <CadastroPage><CadastroForm
             suppliers={suppliers.filter(supplier => supplier.ativo !== false)}
             companySettings={companySettings}

@@ -4,6 +4,7 @@ import {useEffect, useRef, useState} from "react";
 import {ChevronDown, ChevronUp, Menu, X} from "lucide-react";
 
 const NAV_ITEMS = [
+  {key: "dash", label: "Dashboard", icon: "ti-chart-dashboard"},
   {key: "cadastro", label: "Produto", icon: "ti-plus"},
   {key: "estoque", label: "Estoque", icon: "ti-list", countKey: "products"},
   {key: "clientes", label: "Pessoas", icon: "ti-address-book", countKey: "clientes"},

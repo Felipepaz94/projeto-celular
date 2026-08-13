@@ -28,11 +28,20 @@ create table if not exists public.clientes (
   observacoes text,
   cliente boolean not null default true,
   fornecedor boolean not null default false,
+  trading boolean not null default false,
   created_at timestamptz not null default now()
 );
 
 create table if not exists public.fabricantes (
   nome text primary key,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.product_types (
+  key text primary key,
+  label text not null,
+  icon text not null default 'ti-box',
+  sub text not null default 'Serial · sem qtd',
   created_at timestamptz not null default now()
 );
 
@@ -47,6 +56,7 @@ create table if not exists public.sales (
   cliente_contato text,
   total numeric(14,2) not null default 0 check (total >= 0),
   status text not null default 'ativo',
+  estornado_por uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now()
 );
 
@@ -61,6 +71,7 @@ create table if not exists public.products (
   caixa boolean,
   identifier text,
   fornecedor text references public.suppliers(name) on update cascade,
+  trading text,
   nome text,
   quantidade integer,
   custo numeric(14,2) not null default 0,
@@ -102,6 +113,7 @@ create table if not exists public.sale_items (
   product_snapshot jsonb,
   estornado_em timestamptz,
   motivo_estorno text,
+  estornado_por uuid references auth.users(id) on delete set null,
   trocado_em timestamptz,
   troca_do_item_id uuid references public.sale_items(id) on delete set null,
   created_at timestamptz not null default now()
@@ -117,6 +129,10 @@ create table if not exists public.sale_payments (
   valor numeric(14,2) not null default 0,
   bandeira text references public.bandeiras_cartao(nome) on update cascade,
   parcelas smallint,
+  status text not null default 'ativo',
+  estornado_em timestamptz,
+  motivo_estorno text,
+  estornado_por uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now()
 );
 
@@ -138,6 +154,7 @@ create table if not exists public.taxas_cartao (
 create table if not exists public.configuracoes_empresa (
   id smallint primary key default 1,
   nome_fantasia text,
+  slogan text,
   razao_social text,
   documento text,
   telefone text,
@@ -164,10 +181,42 @@ create table if not exists public.comissoes_vendedores (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.financial_movements (
+  id uuid primary key default gen_random_uuid(),
+  movement_type text not null check (movement_type in ('entrada','despesa')),
+  category text not null,
+  description text not null,
+  amount numeric(14,2) not null check (amount > 0),
+  movement_date date not null default current_date,
+  seller_id uuid references public.user_profiles(id) on delete set null,
+  seller_name text,
+  notes text,
+  status text not null default 'ativo' check (status in ('ativo','cancelado')),
+  created_by uuid references auth.users(id) on delete set null,
+  updated_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 -- ------------------------------------------------------------
 -- ATUALIZAÇÃO DE ESTRUTURAS ANTIGAS
 -- ------------------------------------------------------------
 
+alter table public.clientes add column if not exists trading boolean not null default false;
+alter table public.products add column if not exists trading text;
+alter table public.sales add column if not exists estornado_por uuid references auth.users(id) on delete set null;
+alter table public.sale_items add column if not exists estornado_por uuid references auth.users(id) on delete set null;
+alter table public.sale_payments add column if not exists status text not null default 'ativo';
+alter table public.sale_payments add column if not exists estornado_em timestamptz;
+alter table public.sale_payments add column if not exists motivo_estorno text;
+alter table public.sale_payments add column if not exists estornado_por uuid references auth.users(id) on delete set null;
+alter table public.configuracoes_empresa add column if not exists slogan text;
+alter table public.product_types add column if not exists label text;
+alter table public.product_types add column if not exists icon text not null default 'ti-box';
+alter table public.product_types add column if not exists sub text not null default 'Serial · sem qtd';
+alter table public.product_types add column if not exists created_at timestamptz not null default now();
+update public.product_types set label = coalesce(nullif(trim(label), ''), key);
+alter table public.product_types alter column label set not null;
 alter table public.products add column if not exists custo_base numeric(14,2) not null default 0;
 alter table public.products add column if not exists reparos jsonb not null default '[]'::jsonb;
 alter table public.products add column if not exists descricao text;
@@ -203,7 +252,7 @@ do $sql$
 declare tabela text;
 begin
   foreach tabela in array array[
-    'products','suppliers','product_photos','clientes','fabricantes','sales',
+    'products','product_types','suppliers','product_photos','clientes','fabricantes','sales',
     'sale_items','sale_payments','protecao_planos','bandeiras_cartao',
     'taxas_cartao','configuracoes_empresa','comissoes_vendedores'
   ] loop
@@ -271,7 +320,7 @@ on conflict (name) do update set ativo = true, inativado_em = null;
 
 alter table public.products drop constraint if exists products_kind_check;
 alter table public.products add constraint products_kind_check
-  check (kind in ('celular','ipad','mac','jbl','acessorio','outro')) not valid;
+  check (nullif(trim(kind), '') is not null) not valid;
 
 alter table public.products drop constraint if exists products_bateria_check;
 alter table public.products add constraint products_bateria_check
@@ -297,6 +346,9 @@ alter table public.sale_items drop constraint if exists sale_items_status_check;
 alter table public.sale_items add constraint sale_items_status_check
   check (status in ('ativo','estornado','trocado')) not valid;
 
+alter table public.sale_payments drop constraint if exists sale_payments_status_check;
+alter table public.sale_payments add constraint sale_payments_status_check
+  check (status in ('ativo','estornado')) not valid;
 alter table public.sale_payments drop constraint if exists sale_payments_forma_check;
 alter table public.sale_payments add constraint sale_payments_forma_check
   check (forma in ('pix','cartao_credito','cartao_debito','dinheiro','troca','outro')) not valid;
@@ -312,6 +364,10 @@ alter table public.configuracoes_empresa add constraint configuracoes_empresa_id
 -- ÍNDICES
 -- ------------------------------------------------------------
 
+create index if not exists idx_product_types_label on public.product_types(lower(label));
+create index if not exists financial_movements_date_idx on public.financial_movements(movement_date desc);
+create index if not exists financial_movements_type_idx on public.financial_movements(movement_type,status);
+create index if not exists financial_movements_seller_idx on public.financial_movements(seller_id);
 create index if not exists idx_products_kind on public.products(kind);
 create index if not exists idx_products_categoria on public.products(categoria);
 create index if not exists idx_products_status_aprovacao on public.products(status_aprovacao);
@@ -441,7 +497,7 @@ begin
   elsif new.product_snapshot is not null then
     insert into public.products (
       id, kind, fabricante, modelo, memoria, cor, bateria, caixa, identifier,
-      fornecedor, nome, quantidade, custo, custo_base, reparos, venda, categoria,
+      fornecedor, trading, nome, quantidade, custo, custo_base, reparos, venda, categoria,
       descricao, incompleto, status_aprovacao, venda_origem_id, created_at,
       ativo, inativado_em
     ) values (
@@ -455,6 +511,7 @@ begin
       nullif(new.product_snapshot->>'caixa','')::boolean,
       new.product_snapshot->>'identifier',
       new.product_snapshot->>'fornecedor',
+      new.product_snapshot->>'trading',
       new.product_snapshot->>'nome',
       nullif(new.product_snapshot->>'quantidade','')::integer,
       coalesce(nullif(new.product_snapshot->>'custo','')::numeric,0),
@@ -511,7 +568,7 @@ do $sql$
 declare tabela text;
 begin
   foreach tabela in array array[
-    'products','suppliers','product_photos','clientes','fabricantes','sales',
+    'products','product_types','suppliers','product_photos','clientes','fabricantes','sales',
     'sale_items','sale_payments','protecao_planos','bandeiras_cartao',
     'taxas_cartao','configuracoes_empresa','comissoes_vendedores'
   ] loop
@@ -524,11 +581,20 @@ end $sql$;
 -- ROW LEVEL SECURITY (RLS)
 -- ------------------------------------------------------------
 
+-- Movimentações financeiras são acessadas somente pela API administrativa
+-- usando a service role. Usuários autenticados não recebem policy direta.
+alter table public.financial_movements enable row level security;
+drop policy if exists authenticated_access on public.financial_movements;
+drop policy if exists authenticated_read on public.financial_movements;
+drop policy if exists authenticated_insert on public.financial_movements;
+drop policy if exists authenticated_update on public.financial_movements;
+drop policy if exists authenticated_delete on public.financial_movements;
+
 do $sql$
 declare tabela text;
 begin
   foreach tabela in array array[
-    'products','suppliers','product_photos','clientes','fabricantes','sales',
+    'products','product_types','suppliers','product_photos','clientes','fabricantes','sales',
     'sale_items','sale_payments','protecao_planos','bandeiras_cartao',
     'taxas_cartao','configuracoes_empresa','comissoes_vendedores'
   ] loop
@@ -560,6 +626,17 @@ for insert to authenticated with check (public.fn_is_admin());
 create policy admins_update_commissions on public.comissoes_vendedores
 for update to authenticated using (public.fn_is_admin()) with check (public.fn_is_admin());
 
+-- Configurações da empresa podem ser lidas pelos usuários, mas alteradas somente por admin.
+drop policy if exists authenticated_read on public.configuracoes_empresa;
+drop policy if exists authenticated_insert on public.configuracoes_empresa;
+drop policy if exists authenticated_update on public.configuracoes_empresa;
+create policy authenticated_read on public.configuracoes_empresa
+for select to authenticated using (true);
+create policy authenticated_insert on public.configuracoes_empresa
+for insert to authenticated with check (public.fn_is_admin());
+create policy authenticated_update on public.configuracoes_empresa
+for update to authenticated using (public.fn_is_admin()) with check (public.fn_is_admin());
+
 -- A identidade visual precisa ser lida antes do login.
 drop policy if exists public_company_branding_read on public.configuracoes_empresa;
 create policy public_company_branding_read on public.configuracoes_empresa
@@ -578,6 +655,16 @@ for update to authenticated using (public.fn_is_admin()) with check (public.fn_i
 -- ------------------------------------------------------------
 
 -- Somente cadastros fixos já definidos no código da aplicação.
+insert into public.product_types(key,label,icon,sub)
+values
+  ('celular','Celular','ti-device-mobile','IMEI · sem qtd'),
+  ('ipad','iPad','ti-device-tablet','Serial · sem qtd'),
+  ('mac','Mac','ti-device-laptop','Serial · sem qtd'),
+  ('jbl','JBL / Áudio','ti-speaker','Serial · sem qtd'),
+  ('acessorio','Acessório','ti-cable','Com quantidade')
+on conflict (key) do update
+set label = excluded.label, icon = excluded.icon, sub = excluded.sub, ativo = true, inativado_em = null;
+
 insert into public.fabricantes(nome)
 values ('Apple'),('Samsung'),('Xiaomi'),('Motorola'),('Google')
 on conflict (nome) do update set ativo = true, inativado_em = null;
