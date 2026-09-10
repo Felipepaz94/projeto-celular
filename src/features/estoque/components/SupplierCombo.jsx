@@ -1,4 +1,9 @@
 "use client";
+import SearchInput from "@/components/shared/SearchInput";
+
+import ModalBackdrop from "@/components/shared/ModalBackdrop";
+import Pagination from "@/components/shared/Pagination";
+
 
 import {useEffect, useRef, useState} from "react";
 import {Building2, Plus, Search, X} from "lucide-react";
@@ -84,7 +89,7 @@ export default function SupplierCombo({value, onChange, suppliers, onAdd}) {
         <Plus size={20} strokeWidth={2.2} aria-hidden="true" />
       </button>
       {showSupplierSearch && (
-        <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) setShowSupplierSearch(false); }}>
+        <ModalBackdrop className="modal-bg" onClose={() => { setShowSupplierSearch(false); }}>
           <div className="modal supplier-search-modal" role="dialog" aria-modal="true" aria-labelledby="supplier-search-title">
             <div className="stock-consult-head">
               <div>
@@ -93,11 +98,7 @@ export default function SupplierCombo({value, onChange, suppliers, onAdd}) {
               </div>
               <button type="button" className="icon-btn" onClick={() => setShowSupplierSearch(false)} aria-label="Fechar" title="Fechar"><X size={18} aria-hidden="true" /></button>
             </div>
-            <div className={"search" + (supplierSearch ? " has-clear" : "")}>
-              <i className="ti ti-search" aria-hidden="true"></i>
-              <input type="text" value={supplierSearch} onChange={event => { setSupplierSearch(event.target.value); setSupplierPage(1); }} placeholder="Buscar fornecedor cadastrado..." autoFocus />
-              {supplierSearch && <button type="button" className="search-clear" onClick={() => { setSupplierSearch(""); setSupplierPage(1); }} aria-label="Limpar busca" title="Limpar busca"><X size={18} aria-hidden="true" /></button>}
-            </div>
+            <SearchInput type="text" value={supplierSearch} onChange={event => { setSupplierSearch(event.target.value); setSupplierPage(1); }} placeholder="Buscar fornecedor cadastrado..." autoFocus clearable onClear={() => { setSupplierSearch(""); setSupplierPage(1); }} />
             <div className="stock-consult-summary">{registeredSuppliers.length} {registeredSuppliers.length === 1 ? "fornecedor encontrado" : "fornecedores encontrados"}</div>
             <div className="supplier-search-list">
               {registeredSuppliers.length === 0 ? (
@@ -111,18 +112,10 @@ export default function SupplierCombo({value, onChange, suppliers, onAdd}) {
               ))}
             </div>
             {registeredSuppliers.length > 0 && (
-              <div className="stock-pagination supplier-search-pagination">
-                <button type="button" className="btn sm" disabled={currentSupplierPage === 1} onClick={() => setSupplierPage(page => Math.max(1, page - 1))}>
-                  <i className="ti ti-chevron-left" aria-hidden="true"></i>Anterior
-                </button>
-                <span>Página {currentSupplierPage} de {supplierTotalPages}</span>
-                <button type="button" className="btn sm" disabled={currentSupplierPage === supplierTotalPages} onClick={() => setSupplierPage(page => Math.min(supplierTotalPages, page + 1))}>
-                  Próxima<i className="ti ti-chevron-right" aria-hidden="true"></i>
-                </button>
-              </div>
+              <Pagination className="stock-pagination supplier-search-pagination" page={currentSupplierPage} totalPages={supplierTotalPages} onChange={setSupplierPage}><span>Página {currentSupplierPage} de {supplierTotalPages}</span></Pagination>
             )}
           </div>
-        </div>
+        </ModalBackdrop>
       )}
       {showCreate && <PessoaModal defaultRole="fornecedor" title="Novo fornecedor" onSave={createComplete} onCancel={() => setShowCreate(false)} />}
     </div>

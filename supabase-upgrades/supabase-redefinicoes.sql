@@ -21,6 +21,8 @@ alter table public.suppliers add column if not exists inativado_em timestamptz;
 alter table public.clientes add column if not exists fornecedor boolean not null default false;
 alter table public.clientes add column if not exists ativo boolean not null default true;
 alter table public.products add column if not exists fornecedor text;
+alter table public.products add column if not exists ativo boolean not null default true;
+alter table public.products add column if not exists inativado_em timestamptz;
 
 insert into public.suppliers(name, ativo, inativado_em)
 select distinct trim(nome), true, null::timestamptz
@@ -58,6 +60,10 @@ begin
          and cliente.fornecedor
          and cliente.ativo
          and cliente.nome = old.nome
+     )
+     and not exists (
+       select 1 from public.products produto
+       where produto.ativo and produto.fornecedor = old.nome
      ) then
     update public.suppliers
        set ativo = false, inativado_em = now()
@@ -141,18 +147,20 @@ create policy authenticated_update on public.configuracoes_empresa
 grant select, insert, update on public.configuracoes_empresa to authenticated;
 
 -- ------------------------------------------------------------
--- 3. TOTAL FINAL: inclui juros do cartao ja gravados nos pagamentos
+-- 3. TOTAL FINAL: somente conferencia, sem reescrever vendas historicas
 -- ------------------------------------------------------------
 
-update public.sales as sale
-set total = payments.total_pago
-from (
-  select sale_id, round(sum(valor)::numeric, 2) as total_pago
-  from public.sale_payments
-  group by sale_id
-) as payments
-where sale.id = payments.sale_id
-  and abs(sale.total - payments.total_pago) > 0.009;
+-- Divergencias ficam preservadas para revisao manual. Uma migracao nunca deve
+-- alterar silenciosamente o total historico de uma venda ja concluida.
+create or replace view public.vendas_totais_divergentes as
+select sale.id as sale_id,sale.total as total_registrado,payments.total_pago,
+       round((payments.total_pago-sale.total)::numeric,2) as diferenca
+from public.sales sale
+join (
+  select sale_id,round(sum(valor)::numeric,2) as total_pago
+  from public.sale_payments where status <> 'estornado' group by sale_id
+) payments on payments.sale_id=sale.id
+where abs(sale.total-payments.total_pago)>0.009;
 
 commit;
 

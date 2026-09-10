@@ -1,5 +1,10 @@
 "use client";
 
+import Pagination, {PageSizeSelector} from "@/components/shared/Pagination";
+import ModalBackdrop from "@/components/shared/ModalBackdrop";
+import SearchInput from "@/components/shared/SearchInput";
+
+
 import React, {useState, useEffect, useMemo, useRef} from "react";
 import {createClient} from "@supabase/supabase-js";
 import * as XLSX from "xlsx";
@@ -9,6 +14,7 @@ import {toast} from "sonner";
 import {BadgeDollarSign, Building2, CalendarDays, Check, Copy, CreditCard, Eye, EyeOff, FileDown, Hash, Pencil, Percent, Plus, Printer, RefreshCw, RotateCcw, ShieldCheck, ShoppingBag, Trash2, UserRound, X} from "lucide-react";
 import {ChipPicker, Field, Toggle2} from "./components/FormControls";
 import SupplierCombo from "./components/SupplierCombo";
+import SearchPicker, {SellerSearchPicker} from "./components/SearchPicker";
 import PessoasPage from "@/features/pessoas/PessoasPage";
 import PessoaModal from "@/features/pessoas/PessoaModal";
 import AppHeader from "./components/AppHeader";
@@ -234,6 +240,7 @@ const localDb = {
         nome: item.nome,
         sub: item.sub,
         productSnapshot,
+        ...saleItemCostSnapshot({quantidade: item.quantidade, productSnapshot}),
       });
 
       if (idx === -1) continue;
@@ -261,6 +268,7 @@ const localDb = {
         nome: item.nome,
         sub: item.sub,
         productSnapshot: item.productSnapshot || null,
+        ...saleItemCostSnapshot({quantidade: item.quantidade, productSnapshot: item.productSnapshot || null}),
       });
     }
 
@@ -425,6 +433,7 @@ const localDb = {
       nome: productDisplayName(novoSnapshot),
       sub: productSubtitle(novoSnapshot) || novoSnapshot.identifier,
       productSnapshot: novoSnapshot,
+      ...saleItemCostSnapshot({quantidade: 1, productSnapshot: novoSnapshot}),
       trocaDoItemId: itemAntigo.id,
     });
 
@@ -673,6 +682,9 @@ function saleItemFromDb(row) {
     kind: row.kind,
     quantidade: row.quantidade,
     vendaUnit: Number(row.venda_unit) || 0,
+    custoUnitSnapshot: Number(row.custo_unit_snapshot) || 0,
+    reparosSnapshot: Number(row.reparos_snapshot) || 0,
+    custoTotalSnapshot: Number(row.custo_total_snapshot) || 0,
     nome: row.nome,
     sub: row.sub,
     productSnapshot: row.product_snapshot ? productFromDb(row.product_snapshot) : null,
@@ -685,7 +697,7 @@ function saleItemFromDb(row) {
 }
 
 function saleItemToDb(saleId, item) {
-
+  const snapshot = saleItemCostSnapshot(item);
   const row = {
     sale_id: saleId,
     product_id: item.productId || null,
@@ -695,6 +707,9 @@ function saleItemToDb(saleId, item) {
     tipo: item.tipo || "produto",
     quantidade: Number(item.quantidade) || 1,
     venda_unit: Number(item.vendaUnit) || 0,
+    custo_unit_snapshot: snapshot.custoUnitSnapshot,
+    reparos_snapshot: snapshot.reparosSnapshot,
+    custo_total_snapshot: snapshot.custoTotalSnapshot,
     status: item.status || "ativo",
     product_snapshot: item.productSnapshot ? productToDb(item.productSnapshot) : null,
     troca_do_item_id: item.trocaDoItemId || null,
@@ -705,6 +720,30 @@ function saleItemToDb(saleId, item) {
 
   return row;
 
+}
+
+function saleItemCostSnapshot(item) {
+  const product = item.productSnapshot || null;
+  const repairTotal = item.reparosSnapshot != null
+    ? Number(item.reparosSnapshot) || 0
+    : (product?.reparos || []).reduce((total, repair) => total + (Number(repair.valor) || 0), 0);
+  const finalUnitCost = Number(product?.custo ?? item.custoUnitSnapshot) || 0;
+  const baseUnitCost = item.custoUnitSnapshot != null
+    ? Number(item.custoUnitSnapshot) || 0
+    : Number(product?.custoBase ?? Math.max(0, finalUnitCost - repairTotal)) || 0;
+  const quantity = Number(item.quantidade) || 1;
+  return {
+    custoUnitSnapshot: baseUnitCost,
+    reparosSnapshot: repairTotal,
+    custoTotalSnapshot: item.custoTotalSnapshot != null
+      ? Number(item.custoTotalSnapshot) || 0
+      : (baseUnitCost + repairTotal) * quantity,
+  };
+}
+
+function saleItemFrozenCost(item) {
+  if (item.custoTotalSnapshot != null) return Number(item.custoTotalSnapshot) || 0;
+  return saleItemCostSnapshot(item).custoTotalSnapshot;
 }
 
 
@@ -991,6 +1030,22 @@ const supabaseDb = {
   },
   async finalizeSale({cartItems, extras = [], tradeIns = [], cliente, pagamentos, total}) {
     const products = await supabaseDb.listProducts();
+    const cmvSchemaCheck = await supabaseClient.from("sale_items").select("custo_unit_snapshot,reparos_snapshot,custo_total_snapshot").limit(1);
+    if (cmvSchemaCheck.error) {
+      const message = String(cmvSchemaCheck.error.message || "").toLowerCase();
+      if (message.includes("snapshot") || message.includes("schema cache")) {
+        throw new Error("O banco precisa da atualização de CMV. Execute supabase-upgrades/2026-09-05/upgrade-cmv-comissoes.sql no SQL Editor do Supabase.");
+      }
+      throw cmvSchemaCheck.error;
+    }
+    const commissionSchemaCheck = await supabaseClient.from("comissoes_movimentos").select("id").limit(1);
+    if (commissionSchemaCheck.error) {
+      const message = String(commissionSchemaCheck.error.message || "").toLowerCase();
+      if (message.includes("comissoes_movimentos") || message.includes("schema cache")) {
+        throw new Error("O banco precisa da atualização de comissões. Execute supabase-upgrades/2026-09-05/upgrade-cmv-comissoes.sql no SQL Editor do Supabase.");
+      }
+      throw commissionSchemaCheck.error;
+    }
     if (tradeIns.length > 0) {
       const schemaCheck = await supabaseClient.from("products").select("status_aprovacao,venda_origem_id,descricao").limit(1);
       if (schemaCheck.error) {
@@ -1011,10 +1066,12 @@ const supabaseDb = {
     const itensVenda = [];
     for (const item of cartItems) {
       const produtoAtual = products.find(p => p.id === item.productId);
-      itensVenda.push({id: uid(), tipo: "produto", status: "ativo", productId: item.productId, kind: item.kind, quantidade: item.quantidade, vendaUnit: item.vendaUnit, nome: item.nome, sub: item.sub, productSnapshot: produtoAtual ? {...produtoAtual} : null});
+      const productSnapshot = produtoAtual ? {...produtoAtual} : null;
+      itensVenda.push({id: uid(), tipo: "produto", status: "ativo", productId: item.productId, kind: item.kind, quantidade: item.quantidade, vendaUnit: item.vendaUnit, nome: item.nome, sub: item.sub, productSnapshot, ...saleItemCostSnapshot({quantidade: item.quantidade, productSnapshot})});
     }
     for (const item of extras) {
-      itensVenda.push({id: uid(), tipo: item.tipo || "protecao", status: "ativo", productId: null, kind: item.kind, quantidade: item.quantidade, vendaUnit: item.vendaUnit, nome: item.nome, sub: item.sub, productSnapshot: item.productSnapshot || null});
+      const productSnapshot = item.productSnapshot || null;
+      itensVenda.push({id: uid(), tipo: item.tipo || "protecao", status: "ativo", productId: null, kind: item.kind, quantidade: item.quantidade, vendaUnit: item.vendaUnit, nome: item.nome, sub: item.sub, productSnapshot, ...saleItemCostSnapshot({quantidade: item.quantidade, productSnapshot})});
     }
     if (itensVenda.length) dbThrow(await supabaseClient.from("sale_items").insert(itensVenda.map(i => saleItemToDb(sale.id, i))));
     if (pagamentos.length) dbThrow(await supabaseClient.from("sale_payments").insert(pagamentos.map(p => paymentToDb(sale.id, p))));
@@ -1053,7 +1110,7 @@ const supabaseDb = {
     if (!itemAntigo) throw new Error("Item não encontrado");
     const novoSnapshot = (await attachProductPhotos([dbThrow(await supabaseClient.from("products").select("*").eq("id", novoProductId).single())]))[0];
     dbThrow(await supabaseClient.from("sale_items").update({status: "trocado", trocado_em: new Date().toISOString()}).eq("id", itemId).eq("sale_id", saleId));
-    const novoItem = {id: uid(), tipo: "produto", status: "ativo", productId: novoSnapshot.id, kind: novoSnapshot.kind, quantidade: 1, vendaUnit: itemAntigo.vendaUnit, nome: productDisplayName(novoSnapshot), sub: productSubtitle(novoSnapshot) || novoSnapshot.identifier, productSnapshot: novoSnapshot, trocaDoItemId: itemAntigo.id};
+    const novoItem = {id: uid(), tipo: "produto", status: "ativo", productId: novoSnapshot.id, kind: novoSnapshot.kind, quantidade: 1, vendaUnit: itemAntigo.vendaUnit, nome: productDisplayName(novoSnapshot), sub: productSubtitle(novoSnapshot) || novoSnapshot.identifier, productSnapshot: novoSnapshot, trocaDoItemId: itemAntigo.id, ...saleItemCostSnapshot({quantidade: 1, productSnapshot: novoSnapshot})};
     dbThrow(await supabaseClient.from("sale_items").insert(saleItemToDb(saleId, novoItem)));
     const [updatedSales, products] = await Promise.all([supabaseDb.listSales(), supabaseDb.listProducts()]);
     return {sale: updatedSales.find(s => s.id === saleId), products};
@@ -1191,6 +1248,41 @@ const supabaseDb = {
       rates: Object.fromEntries(data.map(row => [row.user_id, Number(row.percentual) || 0])),
       defaultRate: Number(settingsResult.data?.percentual_comissao_padrao ?? DEFAULT_COMMISSION_RATE),
     };
+  },
+  async listCommissionMovements() {
+    const data = dbThrow(await supabaseClient.from("comissoes_movimentos").select("*").order("data_geracao", {ascending: false}));
+    return data.map(row => ({
+      id: row.id,
+      saleId: row.sale_id,
+      saleItemId: row.sale_item_id,
+      vendedorId: row.vendedor_id,
+      baseComissao: Number(row.base_comissao) || 0,
+      percentual: Number(row.percentual) || 0,
+      valorComissao: Number(row.valor_comissao) || 0,
+      valorImediato: Number(row.valor_imediato) || 0,
+      valorDiferido: Number(row.valor_diferido) || 0,
+      status: row.status,
+      origem: row.origem,
+      dataGeracao: row.data_geracao,
+      dataLiberacao: row.data_liberacao,
+    }));
+  },
+  async listExpenses() {
+    const data = dbThrow(await supabaseClient.from("despesas").select("*, categoria:categorias_despesas(id,nome)").order("competencia", {ascending: false}));
+    return data.map(row => ({
+      id: row.id,
+      descricao: row.descricao,
+      categoriaId: row.categoria_id,
+      categoria: row.categoria?.nome || "Outros",
+      competencia: row.competencia,
+      vencimento: row.vencimento,
+      dataPagamento: row.data_pagamento,
+      valor: Number(row.valor) || 0,
+      status: row.status,
+      tipo: row.tipo,
+      recorrente: Boolean(row.recorrente),
+      observacao: row.observacao || "",
+    }));
   },
   async setCommissionRates(values, defaultRate) {
     const normalizedDefault = Math.min(100, Math.max(0, Number(defaultRate) || 0));
@@ -1686,17 +1778,7 @@ function isWithinDateRange(value, startDate, endDate) {
   return true;
 }
 
-function PageSizeSelector({value, onChange, minimum, total}) {
-  const options = [...new Set([minimum, 25, 50, 100, 200].filter(option => option === minimum || (option > minimum && option < total)))];
-  return <label className="page-size-selector">
-    <span>Exibir</span>
-    <select value={value} onChange={event => onChange(event.target.value === "all" ? "all" : Number(event.target.value))}>
-      {options.map(option => <option key={option} value={option}>{option}</option>)}
-      <option value="all">Todos ({total})</option>
-    </select>
-    <span>por página</span>
-  </label>;
-}
+
 
 function formatCpfCnpj(value) {
   const digits = String(value || "").replace(/\D/g, "").slice(0, 14);
@@ -2358,7 +2440,7 @@ function productSubtitle(p) {
 
 function ConfirmModal({onConfirm, onCancel, label}) {
   return (
-    <div className="modal-bg" onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onCancel(); }}>
       <div className="modal">
         <h3><i className="ti ti-alert-triangle" aria-hidden="true"></i>Remover produto</h3>
         <p>Tem certeza que deseja remover <strong>{label}</strong> do estoque? Essa ação não pode ser desfeita.</p>
@@ -2367,7 +2449,7 @@ function ConfirmModal({onConfirm, onCancel, label}) {
           <button className="btn" style={{background: "var(--danger-dim)", borderColor: "rgba(242,84,91,0.4)", color: "var(--danger)"}} onClick={onConfirm}>Remover</button>
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -2466,7 +2548,7 @@ function ProductDetailsModal({product, usersById, clientes = [], bandeiras = [],
   };
 
   return (
-    <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onClose(); }}>
       <div className="modal product-details-modal product-receipt-layout" role="dialog" aria-modal="true" aria-labelledby="product-details-title">
         <div className="product-details-head">
           <div className="product-details-heading"><span className="product-details-symbol"><ShoppingBag size={20} aria-hidden="true" /></span><div><h3 id="product-details-title">{productDisplayName(product)}</h3><p>Informações completas do produto</p><div className="product-details-badges"><span className={"badge cat-" + product.kind}>{KIND_META[product.kind]?.label || product.kind}</span><span className="badge">{product.statusAprovacao === "estornado" ? "Estornado" : product.vendido ? "Vendido" : product.ativo === false ? "Inativo" : "Ativo"}</span></div></div></div>
@@ -2513,7 +2595,7 @@ function ProductDetailsModal({product, usersById, clientes = [], bandeiras = [],
           </>}
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -2613,7 +2695,7 @@ function EditProductModal({product, suppliers, onAddSupplier, onSave, onCancel})
   };
 
   return (
-    <div className="modal-bg" onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onCancel(); }}>
       <div className="modal edit-product-modal" style={{maxWidth: 720}}>
         <h3 style={{color: "var(--ink)"}}><i className="ti ti-edit" aria-hidden="true" style={{color: "var(--accent)"}}></i>{product.incompleto ? "Completar cadastro" : "Editar produto"}</h3>
         <p>{product.incompleto
@@ -2712,7 +2794,7 @@ function EditProductModal({product, suppliers, onAddSupplier, onSave, onCancel})
           </button>
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -2872,10 +2954,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
 
       <div className="inventory-filter-toolbar">
       <div className="stock-bar date-filter-bar inventory-filter-row">
-        <div className="search">
-          <i className="ti ti-search" aria-hidden="true"></i>
-          <input type="text" placeholder="Buscar por nome, IMEI, cor, fornecedor..." value={query} onChange={e => setQuery(e.target.value)} />
-        </div>
+        <SearchInput type="text" placeholder="Buscar por nome, IMEI, cor, fornecedor..." value={query} onChange={e => setQuery(e.target.value)} />
         <div className="date-range-filter" aria-label="Filtrar estoque por período">
           <label>
             <span>Data inicial</span>
@@ -3011,7 +3090,7 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
                 })}
               </tbody>
             </table>
-            <div className="list-pagination"><button type="button" className="btn sm" disabled={currentPage === 1} onClick={() => setPage(value => Math.max(1, value - 1))}><i className="ti ti-chevron-left" aria-hidden="true"></i>Anterior</button><div className="pagination-center"><PageSizeSelector value={pageSize} onChange={setPageSize} minimum={15} total={productGroups.length} /><span>Página {currentPage} de {totalPages} · {productGroups.length} {productGroups.length === 1 ? "registro" : "registros"}</span></div><button type="button" className="btn sm" disabled={currentPage === totalPages} onClick={() => setPage(value => Math.min(totalPages, value + 1))}>Próxima<i className="ti ti-chevron-right" aria-hidden="true"></i></button></div>
+            <Pagination className="list-pagination" page={currentPage} totalPages={totalPages} onChange={setPage}><div className="pagination-center"><PageSizeSelector value={pageSize} onChange={setPageSize} minimum={15} total={productGroups.length} /><span>Página {currentPage} de {totalPages} · {productGroups.length} {productGroups.length === 1 ? "registro" : "registros"}</span></div></Pagination>
           </div>
         </div>
       )}
@@ -3159,7 +3238,7 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
   };
 
   return (
-    <div className="modal-bg" onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onCancel(); }}>
       <div className="modal trade-in-modal">
         <h3 style={{color: "var(--ink)"}}><i className="ti ti-replace" aria-hidden="true" style={{color: "var(--accent)"}}></i>{tradeIn ? "Editar aparelho da troca" : "Aparelho na troca"}</h3>
         <p>{tradeIn ? "Revise os dados informados e salve as alterações." : "Informe os dados disponíveis. O aparelho entra no estoque como item de troca e pode ser complementado depois."}</p>
@@ -3242,7 +3321,7 @@ function TradeInModal({onAdd, onCancel, clientes, historyProducts = [], selected
           </button>
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -3268,7 +3347,7 @@ function ItemAvulsoModal({onAdd, onCancel, fabricantes = []}) {
   };
 
   return (
-    <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onCancel(); }}>
       <div className="modal item-avulso-modal">
         <h3 style={{color: "var(--ink)"}}><i className="ti ti-tag" aria-hidden="true" style={{color: "var(--accent)"}}></i>Item avulso</h3>
         <p>Cadastre um produto eletrônico sem estoque ou um serviço prestado nesta venda.</p>
@@ -3296,7 +3375,7 @@ function ItemAvulsoModal({onAdd, onCancel, fabricantes = []}) {
         <div style={{marginTop: 14}}><Field label="Valor" required><BRLCurrencyInput value={form.valor} onChange={value => set("valor", value)} /></Field></div>
         <div className="row" style={{marginTop: 20}}><button className="btn ghost" type="button" onClick={onCancel}>Cancelar</button><button className="btn primary" type="button" onClick={handleAdd} disabled={!form.valor}>Adicionar à venda</button></div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -3370,7 +3449,7 @@ function ClienteCombo({value, onChange, clientes, onSelectExisting, onAddCliente
 
 function CartRemoveConfirm({item, onConfirm, onCancel}) {
   return (
-    <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onCancel(); }}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="cart-remove-title">
         <h3 id="cart-remove-title"><i className="ti ti-alert-triangle" aria-hidden="true"></i>Retirar do carrinho</h3>
         <p>Tem certeza que deseja retirar <strong>{item.nome}</strong> do carrinho?</p>
@@ -3379,7 +3458,7 @@ function CartRemoveConfirm({item, onConfirm, onCancel}) {
           <button className="btn danger" type="button" onClick={onConfirm}>Sim</button>
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -3412,7 +3491,7 @@ function SaleReceiptModal({receipt, companySettings, onClose}) {
   const {sale, tradeIns = []} = receipt;
   const paymentLabel = forma => FORMAS_PAGAMENTO.find(item => item.key === forma)?.label || forma;
   return (
-    <div className="modal-bg receipt-print-root" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <ModalBackdrop className="modal-bg receipt-print-root" onClose={() => { onClose(); }}>
       <div className="modal sale-receipt-modal printable-sale-receipt" role="dialog" aria-modal="true" aria-labelledby="sale-receipt-title">
         <div className="product-details-head">
           <div><h3 id="sale-receipt-title"><i className="ti ti-receipt" aria-hidden="true"></i>Comprovante de compra</h3></div>
@@ -3436,7 +3515,7 @@ function SaleReceiptModal({receipt, companySettings, onClose}) {
         <div className="receipt-total"><span><BadgeDollarSign size={18} aria-hidden="true" />Total da venda</span><strong>{formatBRL(saleFinalTotal(sale))}</strong></div>
         <div className="row receipt-print-actions"><button className="btn receipt-pdf-button" type="button" onClick={() => printSaleReceipt(sale, true)}><FileDown size={17} aria-hidden="true" />Gerar PDF</button><button className="btn receipt-print-button" type="button" onClick={() => printSaleReceipt(sale, false)}><Printer size={17} aria-hidden="true" />Imprimir</button><button className="btn primary" type="button" onClick={onClose}>Fechar comprovante</button></div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -3447,7 +3526,7 @@ function ProtecaoStartModal({planos, onSelect, onClose}) {
     return planos.filter(plano => !term || plano.modelo.toLocaleLowerCase("pt-BR").includes(term));
   }, [planos, search]);
 
-  return <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+  return <ModalBackdrop className="modal-bg" onClose={() => { onClose(); }}>
     <div className="modal protection-picker-modal" role="dialog" aria-modal="true" aria-labelledby="protection-picker-title">
       <div className="stock-consult-head">
         <div><h3 id="protection-picker-title"><ShieldCheck size={18} aria-hidden="true" />Proteção Start</h3><p>Selecione um plano para adicionar à venda</p></div>
@@ -3469,7 +3548,7 @@ function ProtecaoStartModal({planos, onSelect, onClose}) {
         ))}
       </div>
     </div>
-  </div>;
+  </ModalBackdrop>;
 }
 
 function StockConsultModal({products, cart, onAdd, onClose}) {
@@ -3488,10 +3567,10 @@ function StockConsultModal({products, cart, onAdd, onClose}) {
   const visible = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const selectKind = value => { setKind(value); setPage(1); };
 
-  return <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+  return <ModalBackdrop className="modal-bg" onClose={() => { onClose(); }}>
     <div className="modal stock-consult-modal" role="dialog" aria-modal="true" aria-labelledby="stock-consult-title">
       <div className="stock-consult-head"><div><h3 id="stock-consult-title"><ShoppingBag size={18} aria-hidden="true" />Consultar estoque</h3><p>Produtos disponíveis para venda</p></div><button type="button" className="icon-btn" onClick={onClose} aria-label="Fechar"><X size={18} aria-hidden="true" /></button></div>
-      <div className="search"><i className="ti ti-search" aria-hidden="true"></i><input type="text" value={search} onChange={event => { setSearch(event.target.value); setPage(1); }} placeholder="Buscar por nome, modelo, IMEI ou serial..." autoFocus /></div>
+      <SearchInput type="text" value={search} onChange={event => { setSearch(event.target.value); setPage(1); }} placeholder="Buscar por nome, modelo, IMEI ou serial..." autoFocus />
       <div className="stock-kind-filters"><button type="button" className={"btn sm" + (kind === "todos" ? " active" : "")} onClick={() => selectKind("todos")}>Todos</button>{kinds.map(item => <button type="button" key={item.key} className={"btn sm" + (kind === item.key ? " active" : "")} onClick={() => selectKind(item.key)}><i className={"ti " + item.icon} aria-hidden="true"></i>{item.label}</button>)}</div>
       <div className="stock-consult-summary">{filtered.length} {filtered.length === 1 ? "produto encontrado" : "produtos encontrados"}</div>
       <div className="stock-consult-list">{visible.length === 0 ? <div className="stock-consult-empty">Nenhum produto disponível com esses filtros.</div> : visible.map(product => {
@@ -3514,9 +3593,9 @@ function StockConsultModal({products, cart, onAdd, onClose}) {
           }}
         ><div className="stock-consult-info"><strong>{productDisplayName(product)}</strong><span>{productSubtitle(product) || product.identifier || KIND_META[product.kind]?.label}</span></div><span className="badge">{KIND_META[product.kind]?.label || product.kind}</span><span className="stock-consult-qty">{product.kind === "acessorio" ? `${product.quantidade} un.` : ""}</span><strong className="stock-consult-price">{formatBRL(product.venda)}</strong><button type="button" className="btn primary sm stock-consult-add" disabled={reachedLimit} aria-label={reachedLimit ? "Produto no carrinho" : `Adicionar ${productDisplayName(product)}`} title={reachedLimit ? "Produto no carrinho" : "Adicionar à venda"} onClick={event => { event.stopPropagation(); addProduct(); }}>{reachedLimit ? <Check size={18} aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}</button></div>;
       })}</div>
-      <div className="stock-pagination"><button type="button" className="btn sm" disabled={currentPage === 1} onClick={() => setPage(value => Math.max(1, value - 1))}><i className="ti ti-chevron-left" aria-hidden="true"></i>Anterior</button><span>Página {currentPage} de {totalPages}</span><button type="button" className="btn sm" disabled={currentPage === totalPages} onClick={() => setPage(value => Math.min(totalPages, value + 1))}>Próxima<i className="ti ti-chevron-right" aria-hidden="true"></i></button></div>
+      <Pagination page={currentPage} totalPages={totalPages} onChange={setPage} />
     </div>
-  </div>;
+  </ModalBackdrop>;
 }
 
 function PDV({products, historyProducts = [], clientes, suppliers, fabricantes = [], companySettings, protecaoPlanos, taxasCartao, bandeiras, onSaleComplete, onAddTradeIn, onAddCliente}) {
@@ -3527,7 +3606,7 @@ function PDV({products, historyProducts = [], clientes, suppliers, fabricantes =
   const [editingTradeIndex, setEditingTradeIndex] = useState(null);
   const [showAvulsoModal, setShowAvulsoModal] = useState(false);
   const [showProtecaoPicker, setShowProtecaoPicker] = useState(false);
-  const [showStockConsult, setShowStockConsult] = useState(false);
+
 
   const [clienteSelecionadoId, setClienteSelecionadoId] = useState(null);
   const [clienteNome, setClienteNome] = useState("");
@@ -3830,31 +3909,14 @@ function PDV({products, historyProducts = [], clientes, suppliers, fabricantes =
           <h2><i className="ti ti-search" aria-hidden="true"></i>Buscar produto</h2>
           <span className="sub">por nome, modelo, IMEI ou serial</span>
         </div>
-        <div className="pdv-product-search-row">
-          <div className={"search" + (query ? " has-clear" : "")}>
-            <i className="ti ti-search" aria-hidden="true"></i>
-            <input type="text" placeholder="Ex: iPhone 13, 35291..., Cabo USB-C" value={query} onChange={e => setQuery(e.target.value)} autoFocus />
-            {query && <button type="button" className="search-clear pdv-search-clear" onClick={event => { setQuery(""); event.currentTarget.previousElementSibling?.focus(); }} aria-label="Limpar busca" title="Limpar busca"><X size={18} strokeWidth={2.2} aria-hidden="true" /></button>}
-          </div>
-          <button type="button" className="btn pdv-stock-consult-button" onClick={() => setShowStockConsult(true)} aria-label="Consultar estoque" title="Consultar estoque"><ShoppingBag size={19} strokeWidth={1.9} aria-hidden="true" /></button>
-        </div>
-        {results.length > 0 && (
-          <div className="pdv-search-results">
-            {results.map(p => {
-              const inCart = cart.find(c => c.productId === p.id);
-              const disabled = p.kind !== "acessorio" && inCart;
-              return (
-                <div key={p.id} className={"pdv-result" + (disabled ? " disabled" : "")} onClick={() => !disabled && addToCart(p)}>
-                  <div>
-                    <div className="pr-name">{productDisplayName(p)}</div>
-                    <div className="pr-sub">{productSubtitle(p) || p.identifier}{p.kind === "acessorio" ? ` · ${p.quantidade} disponível` : ""}{disabled ? " · já no carrinho" : ""}</div>
-                  </div>
-                  <div className="pr-price">{formatBRL(p.venda)}</div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+        <SearchPicker
+          query={query} onQueryChange={setQuery} results={results} onSelect={addToCart}
+          placeholder="Ex: iPhone 13, 35291..., Cabo USB-C" label="Consultar estoque"
+          icon={<ShoppingBag size={19} strokeWidth={1.9} aria-hidden="true" />} autoFocus
+          isDisabled={product => product.kind !== "acessorio" && cart.some(item => item.productId === product.id)}
+          renderItem={product => <><div><div className="pr-name">{productDisplayName(product)}</div><div className="pr-sub">{productSubtitle(product) || product.identifier}{product.kind === "acessorio" ? ` · ${product.quantidade} disponível` : ""}{product.kind !== "acessorio" && cart.some(item => item.productId === product.id) ? " · já no carrinho" : ""}</div></div><div className="pr-price">{formatBRL(product.venda)}</div></>}
+          renderModal={({onClose}) => <StockConsultModal products={products} cart={cart} onAdd={addToCart} onClose={onClose} />}
+        />
 
         <div className="actions" style={{marginTop: 14}}>
           <button type="button" className="btn sm" onClick={() => setShowProtecaoPicker(true)}>
@@ -4046,7 +4108,6 @@ function PDV({products, historyProducts = [], clientes, suppliers, fabricantes =
 
       {showProtecaoPicker && <ProtecaoStartModal planos={protecaoPlanos} onSelect={addProtecao} onClose={() => setShowProtecaoPicker(false)} />}
 
-      {showStockConsult && <StockConsultModal products={products} cart={cart} onAdd={addToCart} onClose={() => setShowStockConsult(false)} />}
 
       {removeTarget && (
         <CartRemoveConfirm item={removeTarget} onCancel={() => setRemoveTarget(null)} onConfirm={() => { removeFromCart(removeTarget.id); setRemoveTarget(null); }} />
@@ -4078,7 +4139,7 @@ function EstornoVendaModal({sale, onConfirm, onCancel}) {
   };
 
   return (
-    <div className="modal-bg" onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onCancel(); }}>
       <div className="modal">
         <h3><RotateCcw size={18} aria-hidden="true" />Estornar venda</h3>
         <p>Tem certeza que deseja estornar a venda de <strong>{formatBRL(saleFinalTotal(sale))}</strong>? Todos os produtos serão devolvidos ao estoque e a venda será marcada como estornada.</p>
@@ -4093,7 +4154,7 @@ function EstornoVendaModal({sale, onConfirm, onCancel}) {
           </button>
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -4117,17 +4178,14 @@ function TrocaItemModal({item, products, onConfirm, onCancel}) {
   };
 
   return (
-    <div className="modal-bg" onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onCancel(); }}>
       <div className="modal" style={{maxWidth: 480}}>
         <h3><i className="ti ti-replace" aria-hidden="true" style={{color: "var(--accent)"}}></i>Trocar item</h3>
         <p>
           Trocando <strong>{item.nome}</strong>{item.sub ? ` · ${item.sub}` : ""} por outro produto do estoque.
           O item atual volta ao estoque e o valor pago (<strong>{formatBRL(item.vendaUnit * item.quantidade)}</strong>) é mantido na venda.
         </p>
-        <div className="search">
-          <i className="ti ti-search" aria-hidden="true"></i>
-          <input type="text" placeholder="Buscar produto no estoque..." value={query} onChange={e => setQuery(e.target.value)} autoFocus />
-        </div>
+        <SearchInput type="text" placeholder="Buscar produto no estoque..." value={query} onChange={e => setQuery(e.target.value)} autoFocus />
         {candidatos.length > 0 && (
           <div className="pdv-search-results" style={{marginTop: 8}}>
             {candidatos.map(p => (
@@ -4145,7 +4203,7 @@ function TrocaItemModal({item, products, onConfirm, onCancel}) {
           <button className="btn ghost" onClick={onCancel}>Cancelar</button>
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -4163,7 +4221,7 @@ function SaleDetailsModal({sale, tradeIns, usersById, clientDocument, companySet
     window.setTimeout(() => onEstornarVenda(), 80);
   };
   return (
-    <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onClose(); }}>
       <div className="modal sale-details-modal printable-sale-receipt" role="dialog" aria-modal="true" aria-labelledby="sale-details-title">
         <div className="product-details-head"><div><h3 id="sale-details-title"><i className="ti ti-receipt" aria-hidden="true"></i>Detalhes da venda</h3><p>{sale.cliente?.nome || "Cliente não identificado"}</p></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Fechar" title="Fechar"><X size={20} aria-hidden="true" /></button></div>
         {companySettings?.nomeFantasia && <div className="receipt-company">{companySettings.logoData && <img className="receipt-company-logo" src={companySettings.logoData} alt={`Logo ${companySettings.nomeFantasia}`} />}<strong>{companySettings.nomeFantasia}</strong>{companySettings.razaoSocial && <span>{companySettings.razaoSocial}</span>}<span>{[formatCpfCnpj(companySettings.documento), companySettings.telefone, companySettings.email].filter(value => value && value !== "Não informado").join(" · ")}</span>{companySettings.endereco && <span>{companySettings.endereco}</span>}</div>}
@@ -4180,7 +4238,7 @@ function SaleDetailsModal({sale, tradeIns, usersById, clientDocument, companySet
         <div className="receipt-total"><span><BadgeDollarSign size={18} aria-hidden="true" />Total da venda</span><strong>{formatBRL(saleFinalTotal(sale))}</strong></div>
         <div className={"sale-details-footer receipt-print-actions" + (preparingVoid ? " is-processing" : "")}><button className="btn receipt-pdf-button" type="button" onClick={() => printSaleReceipt(sale, true)} disabled={preparingVoid}><FileDown size={17} aria-hidden="true" />Gerar PDF</button><button className="btn receipt-print-button" type="button" onClick={() => printSaleReceipt(sale, false)} disabled={preparingVoid}><Printer size={17} aria-hidden="true" />Imprimir</button>{sale.status !== "estornada" && <button className="btn sale-void-button" type="button" onClick={handleVoidClick} disabled={preparingVoid} aria-busy={preparingVoid}>{preparingVoid ? <><RotateCcw className="button-wait-spinner" size={17} aria-hidden="true" />Aguarde...</> : <><RotateCcw size={17} aria-hidden="true" />Estornar venda</>}</button>}</div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -4252,10 +4310,7 @@ function Historico({sales, products, clientes, usersById, companySettings, reloa
       </div>
 
       <div className="stock-bar date-filter-bar">
-        <div className="search">
-          <i className="ti ti-search" aria-hidden="true"></i>
-          <input type="text" placeholder="Buscar por cliente ou produto..." value={query} onChange={e => setQuery(e.target.value)} />
-        </div>
+        <SearchInput type="text" placeholder="Buscar por cliente ou produto..." value={query} onChange={e => setQuery(e.target.value)} />
         <div className="date-range-filter" aria-label="Filtrar vendas por período">
           <label>
             <span>Data inicial</span>
@@ -4303,7 +4358,7 @@ function Historico({sales, products, clientes, usersById, companySettings, reloa
               </tr>;
             })}</tbody>
           </table>
-          <div className="list-pagination"><button type="button" className="btn sm" disabled={currentPage === 1} onClick={() => setPage(value => Math.max(1, value - 1))}><i className="ti ti-chevron-left" aria-hidden="true"></i>Anterior</button><div className="pagination-center"><PageSizeSelector value={pageSize} onChange={setPageSize} minimum={10} total={filtered.length} /><span>Página {currentPage} de {totalPages} · {filtered.length} {filtered.length === 1 ? "venda" : "vendas"}</span></div><button type="button" className="btn sm" disabled={currentPage === totalPages} onClick={() => setPage(value => Math.min(totalPages, value + 1))}>Próxima<i className="ti ti-chevron-right" aria-hidden="true"></i></button></div>
+          <Pagination className="list-pagination" page={currentPage} totalPages={totalPages} onChange={setPage}><div className="pagination-center"><PageSizeSelector value={pageSize} onChange={setPageSize} minimum={10} total={filtered.length} /><span>Página {currentPage} de {totalPages} · {filtered.length} {filtered.length === 1 ? "venda" : "vendas"}</span></div></Pagination>
         </div>
       )}
 
@@ -4390,7 +4445,7 @@ function ImportPlanosModal({onConfirm, onCancel}) {
   };
 
   return (
-    <div className="modal-bg" onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { onCancel(); }}>
       <div className="modal" style={{maxWidth: 560}}>
         <h3 style={{color: "var(--ink)"}}><i className="ti ti-file-spreadsheet" aria-hidden="true" style={{color: "var(--accent)"}}></i>Importar planos por planilha</h3>
         <p>
@@ -4460,7 +4515,7 @@ function ImportPlanosModal({onConfirm, onCancel}) {
           ) : null}
         </div>
       </div>
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -4599,7 +4654,7 @@ function ProductHistoryPanel({products = [], sales = [], usersById = {}}) {
   return (
     <div className="panel config-section product-history-section">
       <div className="product-history-launch"><div><h3><CalendarDays size={18} aria-hidden="true" />Histórico dos produtos</h3><p className="csub">consulte toda a trajetória de um aparelho pelo IMEI</p></div><button className="btn primary" type="button" onClick={() => setOpen(true)}><CalendarDays size={16} aria-hidden="true" />Consultar histórico</button></div>
-      {open && <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) setOpen(false); }}>
+      {open && <ModalBackdrop className="modal-bg" onClose={() => { setOpen(false); }}>
         <div className="modal product-history-modal" role="dialog" aria-modal="true" aria-labelledby="product-history-title">
           <div className="product-details-head"><div><h3 id="product-history-title"><CalendarDays size={18} aria-hidden="true" />Consultar histórico</h3><p>Informe os 15 dígitos do IMEI do aparelho.</p></div><button className="icon-btn" type="button" onClick={() => setOpen(false)} aria-label="Fechar" title="Fechar"><X size={20} aria-hidden="true" /></button></div>
           <Field label="IMEI">
@@ -4619,12 +4674,12 @@ function ProductHistoryPanel({products = [], sales = [], usersById = {}}) {
               })}</div>
             </div>}
         </div>
-      </div>}
+      </ModalBackdrop>}
     </div>
   );
 }
 
-function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras, products, sales, usersById, onSaveCompany, onAddPlano, onUpdatePlano, onDeletePlano, onSaveTaxas, onAddBandeira, onRenameBandeira, onImportPlanos}) {
+function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras, products, sales, usersById, accessToken, onSaveCompany, onAddPlano, onUpdatePlano, onDeletePlano, onSaveTaxas, onAddBandeira, onRenameBandeira, onImportPlanos}) {
   const [taxas, setTaxas] = useState(taxasCartao);
   const [company, setCompany] = useState(companySettings);
   const [savingCompany, setSavingCompany] = useState(false);
@@ -4643,6 +4698,7 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
   const [renameValue, setRenameValue] = useState("");
 
   const [showImport, setShowImport] = useState(false);
+  const [exportingBackup, setExportingBackup] = useState("");
 
   useEffect(() => setTaxas(taxasCartao), [taxasCartao]);
   useEffect(() => setCompany(companySettings), [companySettings]);
@@ -4705,6 +4761,77 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
     showToast(`${rows.length} planos importados`);
   };
 
+  const loadDatabaseBackup = async () => {
+    if (!accessToken) throw new Error("Sua sessão expirou. Entre novamente para gerar o backup.");
+    const response = await fetch("/api/admin/database-backup", {cache: "no-store", headers: {Authorization: `Bearer ${accessToken}`}});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Não foi possível gerar o backup.");
+    return data;
+  };
+
+  const downloadBlob = (content, type, fileName) => {
+    const url = URL.createObjectURL(new Blob([content], {type}));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const backupDate = value => String(value || new Date().toISOString()).slice(0, 10);
+  const excelCellValue = value => {
+    if (value == null) return "";
+    if (typeof value === "object") return JSON.stringify(value);
+    const text = String(value);
+    return text.length > 32000 ? `${text.slice(0, 31900)}\n[Conteúdo completo disponível no backup JSON]` : value;
+  };
+
+  const exportBackupJson = async () => {
+    setExportingBackup("json");
+    try {
+      const backup = await loadDatabaseBackup();
+      downloadBlob(JSON.stringify(backup, null, 2), "application/json;charset=utf-8", `backup-supabase-${backupDate(backup.generatedAt)}.json`);
+      showToast("Backup completo em JSON baixado");
+    } catch (error) {
+      showToast(error.message || "Não foi possível gerar o backup");
+    } finally {
+      setExportingBackup("");
+    }
+  };
+
+  const exportBackupExcel = async () => {
+    setExportingBackup("xlsx");
+    try {
+      const backup = await loadDatabaseBackup();
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+        ["BACKUP DO SUPABASE"], ["Gerado em", backup.generatedAt], ["Gerado por", backup.generatedBy], [],
+        ["Como restaurar no Supabase Free"],
+        ["1", "Crie ou atualize a estrutura executando supabase.sql."],
+        ["2", "Abra cada aba e salve-a como CSV UTF-8."],
+        ["3", "No Supabase, abra Table Editor, selecione a tabela e use Import data from CSV."],
+        ["4", "Importe na ordem indicada na aba ORDEM_RESTAURACAO."],
+        ["5", "Usuários precisam redefinir senha; senhas não podem ser exportadas."], [],
+        ["Importante", "Para preservar textos muito grandes, como logos, guarde também o backup JSON."],
+      ]), "LEIA-ME");
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([["ordem", "tabela"], ...backup.restoreOrder.map((table, index) => [index + 1, table])]), "ORDEM_RESTAURACAO");
+      Object.entries(backup.tables || {}).forEach(([table, rows]) => {
+        const normalized = (rows || []).map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, excelCellValue(value)])));
+        XLSX.utils.book_append_sheet(workbook, normalized.length ? XLSX.utils.json_to_sheet(normalized) : XLSX.utils.aoa_to_sheet([["Tabela sem registros"]]), table.slice(0, 31));
+      });
+      const authRows = (backup.authUsers || []).map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, excelCellValue(value)])));
+      XLSX.utils.book_append_sheet(workbook, authRows.length ? XLSX.utils.json_to_sheet(authRows) : XLSX.utils.aoa_to_sheet([["Nenhum usuário"]]), "auth_users");
+      XLSX.writeFile(workbook, `backup-supabase-${backupDate(backup.generatedAt)}.xlsx`, {compression: true});
+      showToast("Backup em Excel baixado");
+    } catch (error) {
+      showToast(error.message || "Não foi possível gerar o backup");
+    } finally {
+      setExportingBackup("");
+    }
+  };
+
   const startRename = (b) => { setRenameTarget(b); setRenameValue(b); };
   const saveRename = async () => {
     if (!renameValue.trim() || renameValue.trim() === renameTarget) { setRenameTarget(null); return; }
@@ -4716,6 +4843,21 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
   return (
     <div>
       <ProductHistoryPanel products={products} sales={sales} usersById={usersById} />
+      <details className="panel config-section config-accordion backup-config-section">
+        <summary><div><h3><FileDown size={18} aria-hidden="true" />Backup do banco de dados</h3><p className="csub">baixe uma cópia segura dos dados armazenados no Supabase</p></div></summary>
+        <div className="config-accordion-body">
+          <p className="backup-description">O backup completo em JSON preserva todos os dados. A versão em Excel separa cada tabela em uma aba e inclui a ordem recomendada para restauração pelo Table Editor do Supabase.</p>
+          <div className="backup-actions">
+            <button className="btn primary" type="button" disabled={Boolean(exportingBackup)} onClick={exportBackupJson}>
+              <FileDown size={17} aria-hidden="true" />{exportingBackup === "json" ? "Gerando backup..." : "Baixar backup completo"}
+            </button>
+            <button className="btn" type="button" disabled={Boolean(exportingBackup)} onClick={exportBackupExcel}>
+              <i className="ti ti-file-spreadsheet" aria-hidden="true"></i>{exportingBackup === "xlsx" ? "Gerando Excel..." : "Exportar para Excel"}
+            </button>
+          </div>
+          <p className="backup-warning">Guarde esses arquivos em local protegido. Eles podem conter dados pessoais, financeiros e históricos de vendas.</p>
+        </div>
+      </details>
       <details className="panel config-section config-accordion company-config-section">
         <summary><div><h3><Building2 size={18} aria-hidden="true" />Dados da empresa</h3><p className="csub">informações exibidas no comprovante de venda, impressão e PDF</p></div></summary>
         <div className="config-accordion-body">
@@ -4889,14 +5031,14 @@ function commissionableSaleProfit(sale) {
     .reduce((total, item) => {
       const quantidade = Number(item.quantidade) || 0;
       const receita = (Number(item.vendaUnit) || 0) * quantidade;
-      const custo = item.productSnapshot ? (Number(item.productSnapshot.custo) || 0) * quantidade : 0;
+      const custo = saleItemFrozenCost(item);
       return total + Math.max(0, receita - custo);
     }, 0);
 }
 
 const DEFAULT_COMMISSION_RATE = 5;
 
-function CommissionsPanel({sales, users, products, clientes, companySettings, rates, defaultRate, onSaveRates, onEstornarVenda}) {
+function CommissionsPanel({sales, users, products, clientes, companySettings, rates, defaultRate, commissionMovements = [], accessToken, onSaveRates, onEstornarVenda}) {
   const [startDate, setStartDate] = useState(getDefaultStartDate);
   const [endDate, setEndDate] = useState(() => toDateInputValue(new Date()));
   const [selectedUserId, setSelectedUserId] = useState("");
@@ -4912,9 +5054,51 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
   const [selectedSale, setSelectedSale] = useState(null);
   const [estornoTarget, setEstornoTarget] = useState(null);
   const [consolidatedPage, setConsolidatedPage] = useState(1);
+  const [deductions, setDeductions] = useState([]);
+  const [showDeductionModal, setShowDeductionModal] = useState(false);
+  const [deductionForm, setDeductionForm] = useState({sellerId: "", type: "adiantamento", date: toDateInputValue(new Date()), amount: "", reason: "", notes: ""});
+  const [savingDeduction, setSavingDeduction] = useState(false);
   const SELLERS_PER_PAGE = 10;
   const CONSOLIDATED_PER_PAGE = 5;
   const ADVANCES_PER_PAGE = 10;
+
+  const loadDeductions = async () => {
+    if (!accessToken) return;
+    const response = await fetch("/api/financial-movements?type=despesa", {headers: {Authorization: `Bearer ${accessToken}`}});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Nao foi possivel carregar as deducoes.");
+    setDeductions((data.movements || []).filter(item => item.applies_to_commission || item.category === "Vale para vendedor"));
+  };
+  useEffect(() => { loadDeductions().catch(err => setError(err.message)); }, [accessToken]);
+
+  const saveDeduction = async event => {
+    event.preventDefault();
+    const amount = Number(String(deductionForm.amount).replace(",", "."));
+    if (!deductionForm.sellerId || !deductionForm.reason.trim() || !(amount > 0)) { setError("Informe vendedor, motivo e valor da deducao."); return; }
+    setSavingDeduction(true); setError("");
+    try {
+      const response = await fetch("/api/financial-movements", {method: "POST", headers: {Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json"}, body: JSON.stringify({resource: "commission_deduction", movementType: "despesa", category: "Deducao de comissao", deductionType: deductionForm.type, sellerId: deductionForm.sellerId, movementDate: deductionForm.date, amount, description: deductionForm.reason, notes: deductionForm.notes})});
+      const data = await response.json(); if (!response.ok) throw new Error(data.error || "Nao foi possivel salvar a deducao.");
+      await loadDeductions(); setShowDeductionModal(false); setDeductionForm({sellerId: "", type: "adiantamento", date: toDateInputValue(new Date()), amount: "", reason: "", notes: ""}); setMessage("Deducao registrada com sucesso.");
+    } catch (err) { setError(err.message); } finally { setSavingDeduction(false); }
+  };
+  const cancelDeduction = async id => {
+    if (!window.confirm("Cancelar esta deducao? O historico sera preservado.")) return;
+    const response = await fetch(`/api/financial-movements?id=${encodeURIComponent(id)}`, {method: "DELETE", headers: {Authorization: `Bearer ${accessToken}`}}); const data = await response.json();
+    if (!response.ok) { setError(data.error || "Nao foi possivel cancelar a deducao."); return; } await loadDeductions();
+  };
+
+  const historicalCommissionForSale = sale => {
+    const movements = commissionMovements.filter(item => item.saleId === sale.id && item.status !== "cancelada");
+    if (!movements.length) {
+      const base = commissionableSaleProfit(sale);
+      const rate = Number(draftRates[sale.criadoPor] ?? draftDefaultRate) || 0;
+      return {base, commission: base * rate / 100, rate};
+    }
+    const base = movements.reduce((total, item) => total + item.baseComissao, 0);
+    const commission = movements.reduce((total, item) => total + item.valorComissao, 0);
+    return {base, commission, rate: base > 0 ? commission / base * 100 : 0};
+  };
 
 
   const commissionPeriodSales = useMemo(() => sales.filter(sale =>
@@ -4944,10 +5128,14 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
     .filter(user => !selectedUserId || user.id === selectedUserId)
     .map(user => {
       const userSales = periodSales.filter(sale => sale.criadoPor === user.id);
-      const base = userSales.reduce((total, sale) => total + commissionableSaleProfit(sale), 0);
-      const rate = Number(draftRates[user.id] ?? draftDefaultRate) || 0;
-      return {user, salesCount: userSales.length, base, rate, commission: base * rate / 100};
-    }), [sellers, selectedUserId, periodSales, draftRates, draftDefaultRate]);
+      const saleIds = new Set(userSales.map(sale => sale.id));
+      const movements = commissionMovements.filter(item => item.vendedorId === user.id && saleIds.has(item.saleId) && item.status !== "cancelada");
+      const base = movements.reduce((total, item) => total + item.baseComissao, 0);
+      const commission = movements.reduce((total, item) => total + item.valorComissao, 0);
+      const rate = base > 0 ? commission / base * 100 : Number(draftRates[user.id] ?? draftDefaultRate) || 0;
+      const deduction = deductions.filter(item => item.status === "ativo" && item.seller_id === user.id && isWithinDateRange(item.movement_date, startDate, endDate)).reduce((total, item) => total + Number(item.amount || 0), 0);
+      return {user, salesCount: userSales.length, base, rate, commission, deduction, netCommission: commission - deduction};
+    }), [sellers, selectedUserId, periodSales, commissionMovements, draftRates, draftDefaultRate, deductions, startDate, endDate]);
 
   const sellerRateRows = useMemo(() => sellers.map(user => {
     const userSales = commissionPeriodSales.filter(sale => sale.criadoPor === user.id);
@@ -4971,7 +5159,9 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
     sales: acc.sales + row.salesCount,
     base: acc.base + row.base,
     commission: acc.commission + row.commission,
-  }), {sales: 0, base: 0, commission: 0});
+    deduction: acc.deduction + row.deduction,
+    netCommission: acc.netCommission + row.netCommission,
+  }), {sales: 0, base: 0, commission: 0, deduction: 0, netCommission: 0});
   const sellerSaleGroups = useMemo(() => summaries.filter(summary => summary.salesCount > 0).map(summary => ({
     ...summary,
     sales: periodSales.filter(sale => sale.criadoPor === summary.user.id),
@@ -5026,43 +5216,45 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
           <Field label="Data final"><input type="date" value={endDate} onChange={event => setEndDate(event.target.value)} /></Field>
           <Field label="Vendedor"><select value={selectedUserId} onChange={event => setSelectedUserId(event.target.value)}><option value="">Todos</option>{sellers.map(user => <option key={user.id} value={user.id}>{user.full_name || user.email}</option>)}</select></Field>
         </div>
-        <div className="commission-totals">
+        <div className="commission-totals commission-totals-five">
           <div><span>Vendas no período</span><strong>{totals.sales}</strong></div>
           <div><span>Lucro comissionável</span><strong>{formatBRL(totals.base)}</strong></div>
-          <div><span>Total de comissões</span><strong>{formatBRL(totals.commission)}</strong></div>
+          <div><span>Comissão bruta</span><strong>{formatBRL(totals.commission)}</strong></div>
+          <div><span>Deduções</span><strong className="deduction-value">- {formatBRL(totals.deduction)}</strong></div>
+          <div><span>Comissão líquida</span><strong>{formatBRL(totals.netCommission)}</strong></div>
         </div>
         {error && <div className="auth-alert danger">{error}</div>}
         {message && <div className="auth-alert ok">{message}</div>}
-        <div className="commission-actions"><button className="btn primary" type="button" onClick={() => setShowRatesModal(true)}><i className="ti ti-users" aria-hidden="true"></i>Gerenciar percentuais dos vendedores</button></div>
+        <div className="commission-actions"><button className="btn ghost" type="button" onClick={() => setShowDeductionModal(true)}><i className="ti ti-minus" aria-hidden="true"></i>Adicionar dedução</button><button className="btn primary" type="button" onClick={() => setShowRatesModal(true)}><i className="ti ti-users" aria-hidden="true"></i>Gerenciar percentuais dos vendedores</button></div>
       </div>
       <div className="panel commissions-panel"><div className="panel-head"><div><h2><i className="ti ti-receipt" aria-hidden="true"></i>Vendas consideradas</h2><span className="sub">clique no vendedor e depois na venda para ver todos os detalhes</span></div></div>
         <div className="commission-seller-groups">
           {visibleSellerSaleGroups.map(group => { const expanded = Boolean(expandedSellers[group.user.id]); return <div className="commission-seller-group" key={group.user.id}>
             <button type="button" className="commission-seller-trigger" onClick={() => setExpandedSellers(previous => ({...previous, [group.user.id]: !previous[group.user.id]}))} aria-expanded={expanded}>
-              <div><strong>{group.user.full_name || group.user.email}</strong><span>{group.user.email}</span></div><div className="commission-seller-summary"><span>{group.salesCount} {group.salesCount === 1 ? "venda" : "vendas"}</span><span>Base: <b>{formatBRL(group.base)}</b></span><span>Comissão: <b>{formatBRL(group.commission)}</b></span><i className={`ti ti-chevron-${expanded ? "up" : "down"}`} aria-hidden="true"></i></div>
+              <div><strong>{group.user.full_name || group.user.email}</strong><span>{group.user.email}</span></div><div className="commission-seller-summary"><span>{group.salesCount} {group.salesCount === 1 ? "venda" : "vendas"}</span><span>Bruta: <b>{formatBRL(group.commission)}</b></span><span>Deduções: <b className="deduction-value">- {formatBRL(group.deduction)}</b></span><span>Líquida: <b>{formatBRL(group.netCommission)}</b></span><i className={`ti ti-chevron-${expanded ? "up" : "down"}`} aria-hidden="true"></i></div>
             </button>
             {expanded && <div className="commission-table-wrap"><table className="stock commission-table commission-sales-table"><thead><tr><th>Data</th><th>Cliente</th><th>Status</th><th>Lucro</th><th>Comissao</th></tr></thead><tbody>
-              {group.sales.map(sale => { const base = commissionableSaleProfit(sale); const rate = Number(draftRates[sale.criadoPor] ?? draftDefaultRate) || 0; return <tr key={sale.id} className="stock-clickable-row" tabIndex={0} onClick={() => setSelectedSale(sale)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSale(sale); } }}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{sale.status === "parcialmente_estornada" ? "Parcialmente estornada" : "Ativa"}</td><td>{formatBRL(base)}</td><td className="commission-value">{formatBRL(base * rate / 100)}</td></tr>; })}
+              {group.sales.map(sale => { const historical = historicalCommissionForSale(sale); return <tr key={sale.id} className="stock-clickable-row" tabIndex={0} onClick={() => setSelectedSale(sale)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSale(sale); } }}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{sale.status === "parcialmente_estornada" ? "Parcialmente estornada" : "Ativa"}</td><td>{formatBRL(historical.base)}</td><td className="commission-value">{formatBRL(historical.commission)}</td></tr>; })}
               {group.sales.length === 0 && <tr><td colSpan="5" className="empty-cell">Nenhuma venda deste vendedor no periodo.</td></tr>}
             </tbody></table></div>}
           </div>; })}
           {sellerSaleGroups.length === 0 && <div className="empty-cell">Nenhuma venda no periodo selecionado.</div>}
         </div>
-        {sellerSaleGroups.length > CONSOLIDATED_PER_PAGE && <div className="list-pagination"><button type="button" className="btn sm" disabled={consolidatedCurrentPage === 1} onClick={() => setConsolidatedPage(page => Math.max(1, page - 1))}><i className="ti ti-chevron-left" aria-hidden="true"></i>Anterior</button><span>Página {consolidatedCurrentPage} de {consolidatedTotalPages} · {sellerSaleGroups.length} vendedores</span><button type="button" className="btn sm" disabled={consolidatedCurrentPage === consolidatedTotalPages} onClick={() => setConsolidatedPage(page => Math.min(consolidatedTotalPages, page + 1))}>Próxima<i className="ti ti-chevron-right" aria-hidden="true"></i></button></div>}
+        {sellerSaleGroups.length > CONSOLIDATED_PER_PAGE && <Pagination className="list-pagination" page={consolidatedCurrentPage} totalPages={consolidatedTotalPages} onChange={setConsolidatedPage}><span>Página {consolidatedCurrentPage} de {consolidatedTotalPages} · {sellerSaleGroups.length} vendedores</span></Pagination>}
       </div>
       <section className="commission-print-report" aria-hidden="true">
         <header>
           {companySettings?.logoData && <img src={companySettings.logoData} alt="" />}
           <div><h1>Relatorio de comissoes</h1><strong>{companySettings?.nomeFantasia || "Loja de Celular"}</strong><p>Periodo: {startDate ? new Date(`${startDate}T12:00:00`).toLocaleDateString("pt-BR") : "inicio"} a {endDate ? new Date(`${endDate}T12:00:00`).toLocaleDateString("pt-BR") : "hoje"}</p></div>
         </header>
-        <div className="commission-print-totals"><div><span>Vendas</span><strong>{totals.sales}</strong></div><div><span>Lucro comissionavel</span><strong>{formatBRL(totals.base)}</strong></div><div><span>Total de comissoes</span><strong>{formatBRL(totals.commission)}</strong></div></div>
+        <div className="commission-print-totals"><div><span>Vendas</span><strong>{totals.sales}</strong></div><div><span>Lucro comissionavel</span><strong>{formatBRL(totals.base)}</strong></div><div><span>Comissao bruta</span><strong>{formatBRL(totals.commission)}</strong></div><div><span>Deducoes</span><strong>- {formatBRL(totals.deduction)}</strong></div><div><span>Comissao liquida</span><strong>{formatBRL(totals.netCommission)}</strong></div></div>
         {sellerSaleGroups.map(group => <section className="commission-print-seller" key={group.user.id}>
           <h2><span>{group.user.full_name || group.user.email}</span><small>{group.user.email} · {group.rate.toFixed(2)}%</small></h2>
-          <table><thead><tr><th>Data</th><th>Cliente</th><th>Lucro</th><th>Comissao</th></tr></thead><tbody>{group.sales.map(sale => { const base = commissionableSaleProfit(sale); return <tr key={sale.id}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{formatBRL(base)}</td><td>{formatBRL(base * group.rate / 100)}</td></tr>; })}</tbody><tfoot><tr><td colSpan="2">Total do vendedor</td><td>{formatBRL(group.base)}</td><td>{formatBRL(group.commission)}</td></tr></tfoot></table>
+          <table><thead><tr><th>Data</th><th>Cliente</th><th>Lucro</th><th>Comissao</th></tr></thead><tbody>{group.sales.map(sale => { const historical = historicalCommissionForSale(sale); return <tr key={sale.id}><td>{new Date(sale.criadoEm).toLocaleString("pt-BR")}</td><td>{sale.cliente?.nome || "Nao informado"}</td><td>{formatBRL(historical.base)}</td><td>{formatBRL(historical.commission)}</td></tr>; })}</tbody><tfoot><tr><td colSpan="2">Total do vendedor</td><td>{formatBRL(group.base)}</td><td>{formatBRL(group.commission)}</td></tr></tfoot></table>
         </section>)}
         <footer>Gerado em {new Date().toLocaleString("pt-BR")}</footer>
       </section>
-      {showRatesModal && <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget) setShowRatesModal(false); }}>
+      {showRatesModal && <ModalBackdrop className="modal-bg" onClose={() => { setShowRatesModal(false); }}>
         <div className="modal commission-sellers-modal" role="dialog" aria-modal="true" aria-labelledby="commission-sellers-title">
           <div className="product-details-head"><div><h3 id="commission-sellers-title"><i className="ti ti-percentage" aria-hidden="true"></i>Percentuais dos vendedores</h3><p>{filteredSellerRows.length} {filteredSellerRows.length === 1 ? "vendedor encontrado" : "vendedores encontrados"}</p></div><button className="icon-btn" type="button" onClick={() => setShowRatesModal(false)} aria-label="Fechar" title="Fechar"><X size={20} aria-hidden="true" /></button></div>
           <div className="search commission-seller-search"><i className="ti ti-search" aria-hidden="true"></i><input type="text" value={sellerQuery} onChange={event => setSellerQuery(event.target.value)} placeholder="Pesquisar por nome ou e-mail..." autoFocus /></div>
@@ -5070,10 +5262,17 @@ function CommissionsPanel({sales, users, products, clientes, companySettings, ra
             {visibleSellerRows.map(row => <tr key={row.user.id}><td className="pname">{row.user.full_name || row.user.email}<small>{row.user.email}</small></td><td>{row.salesCount}</td><td>{formatBRL(row.base)}</td><td><div className="commission-rate"><input type="number" min="0" max="100" step="0.01" value={draftRates[row.user.id] ?? draftDefaultRate} onChange={event => setDraftRates(previous => ({...previous, [row.user.id]: event.target.value}))} /><span>%</span></div></td><td className="commission-value">{formatBRL(row.commission)}</td></tr>)}
             {visibleSellerRows.length === 0 && <tr><td colSpan="5" className="empty-cell">Nenhum vendedor encontrado.</td></tr>}
           </tbody></table></div>
-          <div className="list-pagination"><button type="button" className="btn sm" disabled={sellerCurrentPage === 1} onClick={() => setSellerPage(page => Math.max(1, page - 1))}><i className="ti ti-chevron-left" aria-hidden="true"></i>Anterior</button><span>Pagina {sellerCurrentPage} de {sellerTotalPages}</span><button type="button" className="btn sm" disabled={sellerCurrentPage === sellerTotalPages} onClick={() => setSellerPage(page => Math.min(sellerTotalPages, page + 1))}>Proxima<i className="ti ti-chevron-right" aria-hidden="true"></i></button></div>
+          <Pagination className="list-pagination" page={sellerCurrentPage} totalPages={sellerTotalPages} onChange={setSellerPage}><span>Pagina {sellerCurrentPage} de {sellerTotalPages}</span></Pagination>
           <div className="commission-actions"><button className="btn ghost" type="button" onClick={() => setShowRatesModal(false)}>Cancelar</button><button className="btn primary" type="button" onClick={saveRates} disabled={saving}>{saving ? "Salvando..." : "Salvar percentuais"}</button></div>
         </div>
-      </div>}
+      </ModalBackdrop>}
+      <div className="panel commissions-panel"><div className="panel-head"><div><h2><i className="ti ti-minus" aria-hidden="true"></i>Deduções registradas</h2><span className="sub">vales, adiantamentos, estornos e outros descontos preservados no histórico</span></div></div>
+        <div className="commission-table-wrap"><table className="stock commission-table"><thead><tr><th>Data</th><th>Vendedor</th><th>Tipo</th><th>Motivo</th><th>Valor</th><th>Status</th><th></th></tr></thead><tbody>
+          {deductions.filter(item => (!selectedUserId || item.seller_id === selectedUserId) && isWithinDateRange(item.movement_date, startDate, endDate)).map(item => <tr key={item.id}><td>{new Date(`${item.movement_date}T12:00:00`).toLocaleDateString("pt-BR")}</td><td>{item.seller_name || "Vendedor removido"}</td><td>{String(item.deduction_type || "adiantamento").replaceAll("_", " ")}</td><td>{item.description}</td><td className="deduction-value">- {formatBRL(item.amount)}</td><td>{item.status === "ativo" ? "Ativa" : "Cancelada"}</td><td>{item.status === "ativo" && <button className="btn sm ghost" type="button" onClick={() => cancelDeduction(item.id)}>Cancelar</button>}</td></tr>)}
+          {deductions.filter(item => (!selectedUserId || item.seller_id === selectedUserId) && isWithinDateRange(item.movement_date, startDate, endDate)).length === 0 && <tr><td colSpan="7" className="empty-cell">Nenhuma dedução no período.</td></tr>}
+        </tbody></table></div>
+      </div>
+      {showDeductionModal && <ModalBackdrop className="modal-bg" onClose={() => { setShowDeductionModal(false); }}><div className="modal commission-sellers-modal" role="dialog" aria-modal="true" aria-labelledby="deduction-title"><div className="product-details-head"><div><h3 id="deduction-title"><i className="ti ti-minus" aria-hidden="true"></i>Adicionar dedução</h3><p>O valor será descontado da comissão líquida do vendedor.</p></div><button className="icon-btn" type="button" onClick={() => setShowDeductionModal(false)} aria-label="Fechar"><X size={20} /></button></div><form onSubmit={saveDeduction}><div className="commissions-filters deduction-form"><Field label="Vendedor"><SellerSearchPicker sellers={sellers} value={deductionForm.sellerId} onChange={sellerId => setDeductionForm(previous => ({...previous, sellerId}))} /></Field><Field label="Tipo"><select value={deductionForm.type} onChange={event => setDeductionForm(previous => ({...previous, type: event.target.value}))}><option value="adiantamento">Vale / adiantamento</option><option value="estorno">Estorno de venda</option><option value="falta">Falta ou desconto</option><option value="ajuste">Ajuste manual</option><option value="outro">Outro</option></select></Field><Field label="Data"><input type="date" required value={deductionForm.date} onChange={event => setDeductionForm(previous => ({...previous, date: event.target.value}))} /></Field><Field label="Valor"><input type="number" min="0.01" step="0.01" required value={deductionForm.amount} onChange={event => setDeductionForm(previous => ({...previous, amount: event.target.value}))} /></Field><Field label="Motivo"><input required value={deductionForm.reason} onChange={event => setDeductionForm(previous => ({...previous, reason: event.target.value}))} /></Field><Field label="Observação"><input value={deductionForm.notes} onChange={event => setDeductionForm(previous => ({...previous, notes: event.target.value}))} /></Field></div><div className="commission-actions"><button className="btn ghost" type="button" onClick={() => setShowDeductionModal(false)}>Cancelar</button><button className="btn primary" type="submit" disabled={savingDeduction}>{savingDeduction ? "Salvando..." : "Salvar dedução"}</button></div></form></div></ModalBackdrop>}
       {estornoTarget && <EstornoVendaModal sale={estornoTarget} onConfirm={handleCommissionSaleVoid} onCancel={() => setEstornoTarget(null)} />}
       {selectedSale && <SaleDetailsModal sale={selectedSale} tradeIns={products.filter(product => product.vendaOrigemId === selectedSale.id)} usersById={Object.fromEntries(users.map(user => [user.id, user]))} clientDocument={clientes.find(client => client.id === selectedSale.cliente?.id)?.documento || ""} companySettings={companySettings} onClose={() => setSelectedSale(null)} onEstornarVenda={() => { setEstornoTarget(selectedSale); setSelectedSale(null); }} />}
     </div>
@@ -5557,6 +5756,8 @@ function EstoqueApp() {
   const [bandeiras, setBandeiras] = useState(BANDEIRAS_PADRAO);
   const [taxasCartao, setTaxasCartao] = useState({});
   const [commissionRates, setCommissionRates] = useState({});
+  const [commissionMovements, setCommissionMovements] = useState([]);
+  const [expenses, setExpenses] = useState([]);
   const [defaultCommissionRate, setDefaultCommissionRate] = useState(DEFAULT_COMMISSION_RATE);
   const [companySettings, setCompanySettings] = useState({nomeFantasia: "", slogan: "", razaoSocial: "", documento: "", telefone: "", email: "", endereco: ""});
   const [userProfiles, setUserProfiles] = useState([]);
@@ -5584,9 +5785,9 @@ function EstoqueApp() {
       return;
     }
     window.localStorage.setItem("dashboard_report_data_v1", JSON.stringify({
-      sales, products, taxasCartao, bandeiras, companySettings, userProfiles, commissionRates, defaultCommissionRate, generatedAt: new Date().toISOString(),
+      sales, products, taxasCartao, bandeiras, companySettings, userProfiles, commissionRates, commissionMovements, expenses, defaultCommissionRate, generatedAt: new Date().toISOString(),
     }));
-  }, [sales, products, taxasCartao, bandeiras, companySettings, userProfiles, commissionRates, defaultCommissionRate, profile?.role]);
+  }, [sales, products, taxasCartao, bandeiras, companySettings, userProfiles, commissionRates, commissionMovements, expenses, defaultCommissionRate, profile?.role]);
   useEffect(() => {
     if (normalizeRole(profile?.role) !== "admin" || !session?.access_token) return;
     const execute = async payload => {
@@ -5628,10 +5829,12 @@ function EstoqueApp() {
   }, []);
 
   const load = async () => {
-    const [p, s, c, fabs, types, v, cli, planos, band, taxas, users, company, commissions] = await Promise.all([
+    const [p, s, c, fabs, types, v, cli, planos, band, taxas, users, company, commissions, movements, loadedExpenses] = await Promise.all([
       db.listProducts(), db.listSuppliers(), db.listAcessorioCategorias(), db.listFabricantes(), db.listProductTypes(), db.listSales(),
       db.listClientes(), db.listProtecaoPlanos(), db.listBandeiras(), db.getTaxasCartao(), db.listUserProfiles(), db.getCompanySettings(),
       normalizeRole(activeProfile?.role) === "admin" ? db.listCommissionRates() : Promise.resolve({rates: {}, defaultRate: DEFAULT_COMMISSION_RATE}),
+      normalizeRole(activeProfile?.role) === "admin" ? db.listCommissionMovements() : Promise.resolve([]),
+      normalizeRole(activeProfile?.role) === "admin" ? db.listExpenses() : Promise.resolve([]),
     ]);
     setProducts(p);
     setSuppliers(s);
@@ -5647,6 +5850,8 @@ function EstoqueApp() {
     setCompanySettings(company);
     setCommissionRates(commissions.rates || {});
     setDefaultCommissionRate(commissions.defaultRate ?? DEFAULT_COMMISSION_RATE);
+    setCommissionMovements(movements);
+    setExpenses(loadedExpenses);
     try {
       window.localStorage.setItem(COMPANY_BRAND_CACHE_KEY, JSON.stringify({nomeFantasia: company.nomeFantasia || "", slogan: company.slogan || "", logoData: company.logoData || ""}));
     } catch (_error) {}
@@ -5860,9 +6065,10 @@ function EstoqueApp() {
 
   const handleSaleComplete = async (updatedProducts) => {
     setProducts(updatedProducts);
-    const [v, cli] = await Promise.all([db.listSales(), db.listClientes()]);
+    const [v, cli, movements] = await Promise.all([db.listSales(), db.listClientes(), normalizeRole(activeProfile?.role) === "admin" ? db.listCommissionMovements() : Promise.resolve([])]);
     setSales(v);
     setClientes(cli);
+    setCommissionMovements(movements);
   };
 
   const handleDirectSale = async (product, price, client, payment) => {
@@ -5891,8 +6097,9 @@ function EstoqueApp() {
   const handleEstornarItem = async (saleId, itemId, motivo) => {
     const {products: updated} = await db.estornarItemVenda(saleId, itemId, motivo);
     setProducts(updated);
-    const v = await db.listSales();
+    const [v, movements] = await Promise.all([db.listSales(), normalizeRole(activeProfile?.role) === "admin" ? db.listCommissionMovements() : Promise.resolve([])]);
     setSales(v);
+    setCommissionMovements(movements);
   };
 
   const handleSaveCompany = async data => {
@@ -5907,15 +6114,17 @@ function EstoqueApp() {
   const handleEstornarVenda = async (saleId, motivo) => {
     const {products: updated} = await db.estornarVenda(saleId, motivo);
     setProducts(updated);
-    const v = await db.listSales();
+    const [v, movements] = await Promise.all([db.listSales(), normalizeRole(activeProfile?.role) === "admin" ? db.listCommissionMovements() : Promise.resolve([])]);
     setSales(v);
+    setCommissionMovements(movements);
   };
 
   const handleTrocarItem = async (saleId, itemId, novoProductId) => {
     const {products: updated} = await db.trocarItemVenda(saleId, itemId, novoProductId);
     setProducts(updated);
-    const v = await db.listSales();
+    const [v, movements] = await Promise.all([db.listSales(), normalizeRole(activeProfile?.role) === "admin" ? db.listCommissionMovements() : Promise.resolve([])]);
     setSales(v);
+    setCommissionMovements(movements);
   };
 
   const handleAddTradeIn = async (data) => {
@@ -6250,7 +6459,7 @@ function EstoqueApp() {
             onEstornarVenda={handleEstornarVenda}
           /></VendasPage>
       ) : tab === "comissoes" ? (
-        <CommissionsPanel sales={sales} users={userProfiles} products={products} clientes={clientes} companySettings={companySettings} rates={commissionRates} defaultRate={defaultCommissionRate} onSaveRates={handleSaveCommissionRates} onEstornarVenda={handleEstornarVenda} />
+        <CommissionsPanel sales={sales} users={userProfiles} products={products} clientes={clientes} companySettings={companySettings} rates={commissionRates} defaultRate={defaultCommissionRate} commissionMovements={commissionMovements} accessToken={session?.access_token} onSaveRates={handleSaveCommissionRates} onEstornarVenda={handleEstornarVenda} />
       ) : tab === "usuarios" ? (
         <UsuariosPage><UserManagement currentProfile={profile} /></UsuariosPage>
       ) : tab === "fabricantes" ? (
@@ -6264,6 +6473,7 @@ function EstoqueApp() {
             products={products}
             sales={sales}
             usersById={Object.fromEntries(userProfiles.map(user => [user.id, user]))}
+            accessToken={session?.access_token}
             onAddPlano={handleAddPlano}
             onUpdatePlano={handleUpdatePlano}
             onDeletePlano={handleDeletePlano}

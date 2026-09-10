@@ -1,4 +1,9 @@
 -- Execute no SQL Editor do Supabase para habilitar entradas e despesas.
+-- Migracao aditiva e idempotente. Em caso de erro, toda a execucao e desfeita.
+begin;
+
+create extension if not exists pgcrypto;
+
 create table if not exists public.financial_movements (
   id uuid primary key default gen_random_uuid(),
   movement_type text not null check (movement_type in ('entrada','despesa')),
@@ -15,8 +20,12 @@ create table if not exists public.financial_movements (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+alter table public.financial_movements add column if not exists applies_to_commission boolean not null default false;
+alter table public.financial_movements add column if not exists deduction_type text;
 create index if not exists financial_movements_date_idx on public.financial_movements(movement_date desc);
 create index if not exists financial_movements_type_idx on public.financial_movements(movement_type,status);
 create index if not exists financial_movements_seller_idx on public.financial_movements(seller_id);
 alter table public.financial_movements enable row level security;
 -- O acesso é feito exclusivamente pela API administrativa com service role.
+
+commit;

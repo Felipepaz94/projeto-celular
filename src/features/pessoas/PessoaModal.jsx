@@ -1,5 +1,8 @@
 "use client";
 
+import ModalBackdrop from "@/components/shared/ModalBackdrop";
+
+
 import {useState} from "react";
 import {createPortal} from "react-dom";
 import {Field} from "@/features/estoque/components/FormControls";
@@ -67,7 +70,7 @@ export default function PessoaModal({pessoa, defaultRole = "cliente", title, onS
   if (typeof document === "undefined") return null;
 
   return createPortal((
-    <div className="modal-bg" onMouseDown={event => { if (event.target === event.currentTarget && !saving) onCancel(); }}>
+    <ModalBackdrop className="modal-bg" onClose={() => { if (!saving) onCancel(); }}>
       <form className="modal pessoa-modal" onSubmit={submit}>
         <h3><i className="ti ti-address-book" aria-hidden="true"></i>{title || (pessoa ? "Editar cadastro" : "Novo cadastro")}</h3>
         <p>Um mesmo cadastro pode ser Cliente, Fornecedor, Trading ou exercer mais de um papel.</p>
@@ -89,6 +92,6 @@ export default function PessoaModal({pessoa, defaultRole = "cliente", title, onS
           <button className="btn primary" type="submit" disabled={saving}>{saving ? "Salvando..." : "Salvar cadastro"}</button>
         </div>
       </form>
-    </div>
+    </ModalBackdrop>
   ), document.body);
 }

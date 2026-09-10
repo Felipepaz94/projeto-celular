@@ -1,5 +1,8 @@
 "use client";
 
+import SearchInput from "@/components/shared/SearchInput";
+
+
 import {useMemo, useState} from "react";
 import {Plus} from "lucide-react";
 import PessoaModal from "./PessoaModal";
@@ -72,11 +75,7 @@ export default function PessoasPage({pessoas, onSave}) {
         </button>
       </div>
       <div className="pessoas-tools">
-        <div className="search pessoas-search">
-          <i className="ti ti-search" aria-hidden="true"></i>
-          <input value={query} onChange={event => setQuery(event.target.value)} placeholder="Digite o nome, CPF ou CNPJ..." aria-label="Buscar cadastro por nome, CPF ou CNPJ" />
-          {query && <button type="button" className="search-clear" onClick={() => setQuery("")} title="Limpar busca"><i className="ti ti-x" aria-hidden="true"></i></button>}
-        </div>
+        <SearchInput value={query} onChange={event => setQuery(event.target.value)} placeholder="Digite o nome, CPF ou CNPJ..." aria-label="Buscar cadastro por nome, CPF ou CNPJ" className="pessoas-search" clearable onClear={() => setQuery("")} />
         <div className="pessoa-filters" role="group" aria-label="Filtrar tipo de cadastro">
           {FILTERS.map(filter => (
             <button type="button" key={filter.key} className={roleFilter === filter.key ? "active" : ""} onClick={() => setRoleFilter(filter.key)} aria-pressed={roleFilter === filter.key}>
