@@ -206,8 +206,14 @@ create table if not exists public.financial_movements (
 -- ------------------------------------------------------------
 
 alter table public.clientes add column if not exists trading boolean not null default false;
+alter table public.clientes add column if not exists fornecedor boolean not null default false;
+alter table public.clientes add column if not exists ativo boolean not null default true;
 alter table public.products add column if not exists trading text;
+alter table public.products add column if not exists fornecedor text;
+alter table public.products add column if not exists ativo boolean not null default true;
+alter table public.products add column if not exists inativado_em timestamptz;
 alter table public.sales add column if not exists estornado_por uuid references auth.users(id) on delete set null;
+alter table public.sales add column if not exists criado_por uuid references auth.users(id) on delete set null;
 alter table public.sale_items add column if not exists estornado_por uuid references auth.users(id) on delete set null;
 alter table public.sale_payments add column if not exists status text not null default 'ativo';
 alter table public.sale_payments add column if not exists estornado_em timestamptz;
@@ -228,6 +234,7 @@ alter table public.products add column if not exists venda_origem_id uuid refere
 alter table public.configuracoes_empresa add column if not exists logo_data text;
 alter table public.configuracoes_empresa add column if not exists percentual_comissao_padrao numeric(7,4) not null default 5;
 alter table public.comissoes_vendedores alter column percentual set default 5;
+alter table public.comissoes_vendedores add column if not exists ativo boolean not null default true;
 alter table public.user_profiles add column if not exists slug text;
 alter table public.sale_items add column if not exists created_at timestamptz not null default now();
 alter table public.sale_items add column if not exists custo_unit_snapshot numeric(14,2);
@@ -236,6 +243,12 @@ alter table public.sale_items add column if not exists custo_total_snapshot nume
 alter table public.financial_movements add column if not exists applies_to_commission boolean not null default false;
 alter table public.financial_movements add column if not exists deduction_type text;
 update public.financial_movements set applies_to_commission = true, deduction_type = coalesce(deduction_type, 'adiantamento') where category = 'Vale para vendedor';
+
+-- Garante a relação de fornecedor também ao atualizar bancos antigos.
+alter table public.products drop constraint if exists products_fornecedor_fkey;
+alter table public.products add constraint products_fornecedor_fkey
+  foreign key (fornecedor) references public.suppliers(name)
+  on update cascade not valid;
 
 create or replace function public.fn_try_numeric(value text) returns numeric
 language plpgsql immutable
@@ -585,6 +598,12 @@ begin
          and c.fornecedor
          and c.ativo
          and c.nome = old.nome
+     )
+     and not exists (
+       select 1
+       from public.products p
+       where p.ativo
+         and p.fornecedor = old.nome
      ) then
     update public.suppliers
        set ativo = false, inativado_em = now()
@@ -616,6 +635,18 @@ on conflict (name) do update set ativo = true, inativado_em = null;
 -- ------------------------------------------------------------
 -- REGRAS DE INTEGRIDADE
 -- ------------------------------------------------------------
+
+alter table public.configuracoes_empresa
+  drop constraint if exists configuracoes_empresa_percentual_comissao_padrao_check;
+alter table public.configuracoes_empresa
+  add constraint configuracoes_empresa_percentual_comissao_padrao_check
+  check (percentual_comissao_padrao between 0 and 100) not valid;
+
+alter table public.comissoes_vendedores
+  drop constraint if exists comissoes_vendedores_percentual_check;
+alter table public.comissoes_vendedores
+  add constraint comissoes_vendedores_percentual_check
+  check (percentual between 0 and 100) not valid;
 
 alter table public.products drop constraint if exists products_kind_check;
 alter table public.products add constraint products_kind_check
@@ -999,6 +1030,64 @@ alter default privileges in schema public
   grant select, insert, update, delete on tables to authenticated;
 alter default privileges in schema public
   grant execute on functions to authenticated;
+
+-- ------------------------------------------------------------
+-- ENDURECIMENTO FINAL DE PRIVILÉGIOS
+-- ------------------------------------------------------------
+
+do $sql$
+declare tabela text;
+begin
+  foreach tabela in array array[
+    'products','product_types','suppliers','product_photos','clientes','fabricantes','sales',
+    'sale_items','sale_payments','protecao_planos','bandeiras_cartao','taxas_cartao',
+    'configuracoes_empresa','comissoes_vendedores','comissoes_movimentos',
+    'categorias_despesas','despesas','user_profiles','financial_movements'
+  ] loop
+    if to_regclass('public.' || tabela) is not null then
+      execute format('alter table public.%I enable row level security', tabela);
+    end if;
+  end loop;
+end $sql$;
+
+revoke all on all tables in schema public from anon;
+grant select on public.configuracoes_empresa to anon;
+revoke all on public.financial_movements from anon, authenticated;
+
+-- Cadastros estruturais somente podem ser alterados por administradores.
+do $sql$
+declare tabela text;
+begin
+  foreach tabela in array array[
+    'products','product_types','suppliers','product_photos','fabricantes',
+    'protecao_planos','bandeiras_cartao','taxas_cartao'
+  ] loop
+    execute format('drop policy if exists authenticated_insert on public.%I', tabela);
+    execute format('drop policy if exists authenticated_update on public.%I', tabela);
+    execute format('create policy authenticated_insert on public.%I for insert to authenticated with check ((select public.fn_is_admin()))', tabela);
+    execute format('create policy authenticated_update on public.%I for update to authenticated using ((select public.fn_is_admin())) with check ((select public.fn_is_admin()))', tabela);
+  end loop;
+end $sql$;
+
+revoke execute on all functions in schema public from public, anon, authenticated;
+grant execute on function public.fn_is_admin() to authenticated;
+
+-- Preserva a RPC de estorno em bancos que já a possuam.
+do $sql$
+declare func regprocedure;
+begin
+  for func in
+    select p.oid::regprocedure
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname = 'fn_estornar_venda'
+  loop
+    execute format('grant execute on function %s to authenticated', func);
+  end loop;
+end $sql$;
+
+alter default privileges in schema public revoke execute on functions from public, anon;
+alter default privileges in schema public revoke all on tables from anon;
 
 commit;
 
