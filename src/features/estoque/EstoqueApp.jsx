@@ -1648,7 +1648,7 @@ function newUserForm() {
 }
 
 const ROLE_TABS = {
-  admin: ["dash", "cadastro", "estoque", "clientes", "pdv", "historico", "comissoes", "fabricantes", "usuarios", "config"],
+  admin: ["dash", "cadastro", "estoque", "clientes", "pdv", "historico", "relatorios", "comissoes", "fabricantes", "usuarios", "config"],
   vendedor: ["clientes", "pdv"],
 };
 
@@ -1843,6 +1843,7 @@ function emptyFormFor(kind) {
     quantidade: "",
     nome: "",
     photos: [],
+    reparos: [],
   };
   return base;
 }
@@ -2057,23 +2058,30 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
   const [form, setForm] = useState(emptyFormFor("celular"));
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState(false);
   const [addingType, setAddingType] = useState(false);
   const [newTypeName, setNewTypeName] = useState("");
   const [typeError, setTypeError] = useState("");
   const [typeMenuOpen, setTypeMenuOpen] = useState(false);
   const typeSelectorRef = useRef(null);
   const [photoUploadsReady, setPhotoUploadsReady] = useState(false);
+  const [repairsOpen, setRepairsOpen] = useState(false);
 
   const [checkingPhotoUploads, setCheckingPhotoUploads] = useState(true);
 
   const set = (field, val) => setForm(f => ({...f, [field]: val}));
 
   const photos = form.photos || [];
+  const repairs = form.reparos || [];
+  const repairsTotal = useMemo(() => repairs.reduce((total, repair) => total + (Number(repair.valor) || 0), 0), [repairs]);
+  const finalCost = (Number(form.custo) || 0) + repairsTotal;
+  const addRepair = () => setForm(current => ({...current, reparos: [...(current.reparos || []), {id: uid(), descricao: "", valor: ""}]}));
+  const updateRepair = (id, field, value) => setForm(current => ({...current, reparos: (current.reparos || []).map(repair => repair.id === id ? {...repair, [field]: value} : repair)}));
+  const removeRepair = id => setForm(current => ({...current, reparos: (current.reparos || []).filter(repair => repair.id !== id)}));
 
   const switchKind = (k) => {
     setKind(k);
     setForm(emptyFormFor(k));
+    setRepairsOpen(false);
     setErrors({});
   };
   const saveProductType = async () => {
@@ -2169,18 +2177,21 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
   const fabricantesEmDestaque = useMemo(() => fabricantesMaisUsados(kind, fabricantes, products), [kind, fabricantes, products]);
 
   const margem = useMemo(() => {
-    const c = Number(form.custo), v = Number(form.venda);
+    const c = finalCost, v = Number(form.venda);
     if (!c || !v) return null;
     const lucro = v - c;
     const pct = (lucro / c) * 100;
     return {lucro, pct};
-  }, [form.custo, form.venda]);
+  }, [finalCost, form.venda]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     const errs = validate(form);
+    const invalidRepair = repairs.find(repair => Boolean(String(repair.descricao || "").trim()) !== (Number(repair.valor) > 0));
+    if (invalidRepair) errs.reparos = "Preencha a descrição e o valor de cada reparo, ou remova a linha vazia.";
     setErrors(errs);
     if (Object.keys(errs).length > 0) return;
+    const savedRepairs = repairs.filter(repair => String(repair.descricao || "").trim() && Number(repair.valor) > 0).map(repair => ({id: repair.id, descricao: repair.descricao.trim(), valor: Number(repair.valor)}));
 
     const normalizeGroupValue = value => String(value || "").trim().toLocaleLowerCase("pt-BR");
     const groupedAccessory = form.kind === "acessorio" ? products.find(product =>
@@ -2225,7 +2236,9 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
         identifier: isAcessorio ? null : form.identifier,
         fornecedor: form.fornecedor || null,
         quantidade: isAcessorio ? Number(groupedAccessory?.quantidade || 0) + Number(form.quantidade) : null,
-        custo: Number(form.custo),
+        custo: Number(form.custo) + savedRepairs.reduce((total, repair) => total + repair.valor, 0),
+        custoBase: Number(form.custo),
+        reparos: savedRepairs,
         venda: Number(form.venda),
         categoria: form.categoria,
         photos: groupedAccessory ? [...(groupedAccessory.photos || []), ...uploadedPhotos] : uploadedPhotos,
@@ -2237,9 +2250,9 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
         20000,
         "O Supabase atingiu o tempo limite ao cadastrar o produto."
       );
-      setToast(true);
-      setTimeout(() => setToast(false), 2600);
+      toast.success("Produto cadastrado com sucesso.");
       setForm(emptyFormFor(kind));
+      setRepairsOpen(false);
       onSaved(savedProduct);
     } catch (error) {
       console.error("Erro ao cadastrar produto:", error);
@@ -2289,7 +2302,7 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
             <Field label="Quantidade em estoque" required error={errors.quantidade}>
               <input type="number" min="0" step="1" value={form.quantidade} placeholder="0" onChange={e => set("quantidade", e.target.value)} className={errors.quantidade ? "invalid" : ""} />
             </Field>
-            <Field label="Custo (unitário)" required error={errors.custo}>
+            <Field label="Custo base (unitário)" required error={errors.custo}>
               <BRLCurrencyInput value={form.custo} onChange={value => set("custo", value)} className={errors.custo ? "invalid" : ""} />
             </Field>
             <Field label="Venda (unitário)" required error={errors.venda}>
@@ -2359,7 +2372,7 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
                   {(CATEGORIAS[kind] || CATEGORIAS_PADRAO_PRODUTO).map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </Field>
-              <Field label="Custo" required error={errors.custo}>
+              <Field label="Custo base" required error={errors.custo}>
                 <BRLCurrencyInput value={form.custo} onChange={value => set("custo", value)} className={errors.custo ? "invalid" : ""} />
               </Field>
               <Field label="Venda" required error={errors.venda}>
@@ -2368,6 +2381,31 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
             </div>
           </React.Fragment>
         )}
+
+        {repairsTotal > 0 && <div className="pricing-cost-overview" role="status" aria-label="Resumo dos custos para precificação">
+          <div className="pricing-cost-overview-head"><div><span>Custo total para precificação</span><strong>{formatBRL(finalCost)}</strong></div>{Number(form.venda) > 0 && <div className={Number(form.venda) < finalCost ? "pricing-loss" : "pricing-margin"}><span>{Number(form.venda) < finalCost ? "Prejuízo previsto" : "Margem bruta prevista"}</span><strong>{formatBRL(Number(form.venda) - finalCost)}</strong></div>}</div>
+          <div className="pricing-cost-breakdown"><div><span>Custo de entrada</span><strong>{formatBRL(form.custo)}</strong></div>{repairs.filter(repair => Number(repair.valor) > 0).map((repair, index) => <div key={repair.id}><span>{String(repair.descricao || "").trim() || `Reparo ${index + 1}`}</span><strong>+ {formatBRL(repair.valor)}</strong></div>)}</div>
+          <p>O valor dos reparos será incorporado ao custo final do produto.</p>
+        </div>}
+
+        <div className={"repair-section" + (repairsOpen ? " open" : "") }>
+          <button type="button" className="repair-accordion-trigger" onClick={() => setRepairsOpen(value => !value)} aria-expanded={repairsOpen}>
+            <div><strong>Reparos</strong><span>Os valores serão somados ao custo final do produto.</span></div>
+            <div className="repair-accordion-summary"><span>{repairs.filter(repair => String(repair.descricao || "").trim()).length} reparos · {formatBRL(repairsTotal)}</span><b aria-hidden="true">{repairsOpen ? "−" : "+"}</b></div>
+          </button>
+          {repairsOpen && <div className="repair-accordion-content">
+            <div className="repair-actions"><button type="button" className="btn sm" onClick={addRepair}><Plus size={16} aria-hidden="true" />{repairs.length ? "Incluir outro reparo" : "Adicionar reparo"}</button></div>
+            <div className="repair-list">
+              {repairs.length === 0 ? <div className="repair-empty">Nenhum reparo informado.</div> : repairs.map((repair, index) => <div className="repair-row" key={repair.id}>
+                <Field label={`Descrição do reparo ${index + 1}`}><input type="text" value={repair.descricao} onChange={event => updateRepair(repair.id, "descricao", event.target.value)} placeholder="Ex: Troca de tela" /></Field>
+                <Field label="Valor"><BRLCurrencyInput value={repair.valor} onChange={value => updateRepair(repair.id, "valor", value)} /></Field>
+                <button type="button" className="icon-btn danger repair-remove" onClick={() => removeRepair(repair.id)} aria-label={`Remover reparo ${index + 1}`} title="Remover reparo"><X size={18} aria-hidden="true" /></button>
+              </div>)}
+            </div>
+            {errors.reparos && <div className="form-error" role="alert">{errors.reparos}</div>}
+            <div className="repair-totals"><div><span>Custo base</span><strong>{formatBRL(form.custo)}</strong></div><div><span>Total de reparos</span><strong>+ {formatBRL(repairsTotal)}</strong></div><div className="repair-final-cost"><span>Custo final</span><strong>{formatBRL(finalCost)}</strong></div></div>
+          </div>}
+        </div>
 
 
         <div className="photo-uploader">
@@ -2402,7 +2440,7 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
           <button type="submit" className="btn primary" disabled={saving}>
             {saving ? <React.Fragment><i className="ti ti-loader-2" aria-hidden="true"></i>Salvando...</React.Fragment> : <React.Fragment><i className="ti ti-check" aria-hidden="true"></i>Cadastrar produto</React.Fragment>}
           </button>
-          <button type="button" className="btn ghost" onClick={() => { setForm(emptyFormFor(kind)); setErrors({}); }}>Limpar campos</button>
+          <button type="button" className="btn ghost" onClick={() => { setForm(emptyFormFor(kind)); setErrors({}); setRepairsOpen(false); }}>Limpar campos</button>
           {margem && (
             <div className="margin-preview">
               <span>Lucro: <b>{formatBRL(margem.lucro)}</b></span>
@@ -2412,9 +2450,6 @@ function CadastroForm({suppliers, onSaved, onAddSupplier, acessorioCategorias, o
         </div>
       </form>
 
-      {toast && (
-        <div className="toast"><i className="ti ti-circle-check" aria-hidden="true"></i>Produto cadastrado com sucesso</div>
-      )}
     </div>
   );
 }
@@ -2834,6 +2869,10 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
   const [expandedGroups, setExpandedGroups] = useState({});
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(15);
+  const [stockView, setStockView] = useState("overview");
+  const [supplierQuery, setSupplierQuery] = useState("");
+  const [supplierKindFilter, setSupplierKindFilter] = useState("");
+  const [supplierSort, setSupplierSort] = useState("cost-desc");
 
   const toggleStatusFilter = (status) => {
     setStatusFilters(current => current.includes(status)
@@ -2893,15 +2932,19 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
     const isRejected = (p) => p.statusAprovacao === "reprovado";
     const isOutOfStock = (p) => p.kind === "acessorio" && Number(p.quantidade || 0) <= 0;
     const isSold = (p) => p.kind !== "acessorio" && p.vendido;
-    const isAvailableForSale = (p) => !isSold(p) && p.ativo !== false && !p.incompleto && !isAwaiting(p) && !isRejected(p) && !isOutOfStock(p);
+    const isAvailableForSale = (p) => getInventoryStatus(p) === "ativo";
     const totalItens = productsInPeriod.filter(isAvailableForSale).reduce((acc, p) => acc + qtyOf(p), 0);
     const vendidos = productsInPeriod.filter(isSold).length;
     const aguardando = productsInPeriod.filter(p => !isSold(p) && isAwaiting(p)).length;
     const aCompletar = productsInPeriod.filter(p => !isSold(p) && p.ativo !== false && p.incompleto && !isAwaiting(p) && !isRejected(p)).length;
     const semEstoque = productsInPeriod.filter(p => !isSold(p) && p.ativo !== false && !p.incompleto && !isAwaiting(p) && !isRejected(p) && isOutOfStock(p)).length;
     const inativosReprovados = productsInPeriod.filter(p => !isSold(p) && (p.ativo === false || isRejected(p))).reduce((acc, p) => acc + Math.max(qtyOf(p), 1), 0);
-    const valorCusto = productsInPeriod.reduce((acc, p) => acc + Number(p.custo || 0) * qtyOf(p), 0);
-    const valorVenda = productsInPeriod.reduce((acc, p) => acc + Number(p.venda || 0) * qtyOf(p), 0);
+    // Os indicadores financeiros representam o saldo total que ainda esta
+    // disponivel para venda. O periodo e os filtros visuais continuam afetando
+    // a tabela/contadores, mas nao retiram mercadorias ativas destes saldos.
+    const availableProducts = products.filter(isAvailableForSale);
+    const valorCusto = availableProducts.reduce((acc, p) => acc + Number(p.custo || 0) * qtyOf(p), 0);
+    const valorVenda = availableProducts.reduce((acc, p) => acc + Number(p.venda || 0) * qtyOf(p), 0);
     const lucroPotencial = valorVenda - valorCusto;
     const margemPotencialPct = valorVenda > 0 ? (lucroPotencial / valorVenda) * 100 : 0;
     const percentualComissao = Number(defaultCommissionRate) || 0;
@@ -2909,6 +2952,120 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
     const lucroAposComissao = lucroPotencial - comissao;
     return {totalItens, vendidos, aguardando, aCompletar, semEstoque, inativosReprovados, valorCusto, valorVenda, lucroPotencial, margemPotencialPct, percentualComissao, comissao, lucroAposComissao};
   }, [products, defaultCommissionRate, startDate, endDate]);
+
+  const stockBySupplier = useMemo(() => {
+    const grouped = new Map();
+    products.filter(product => getInventoryStatus(product) === "ativo" && (!supplierKindFilter || product.kind === supplierKindFilter)).forEach(product => {
+      const supplierName = String(product.fornecedor || "").trim() || "Sem fornecedor";
+      const groupKey = supplierName.toLocaleLowerCase("pt-BR");
+      const quantity = product.kind === "acessorio" ? Number(product.quantidade || 0) : 1;
+      const current = grouped.get(groupKey) || {fornecedor: supplierName, quantidade: 0, custo: 0, venda: 0};
+      current.quantidade += quantity;
+      current.custo += Number(product.custo || 0) * quantity;
+      current.venda += Number(product.venda || 0) * quantity;
+      grouped.set(groupKey, current);
+    });
+    const term = supplierQuery.trim().toLocaleLowerCase("pt-BR");
+    const rows = [...grouped.values()].filter(row => !term || row.fornecedor.toLocaleLowerCase("pt-BR").includes(term)).map(row => ({
+      ...row,
+      lucro: row.venda - row.custo,
+      margem: row.venda > 0 ? ((row.venda - row.custo) / row.venda) * 100 : 0,
+    }));
+    return rows.sort((a, b) => {
+      if (supplierSort === "name") return a.fornecedor.localeCompare(b.fornecedor, "pt-BR");
+      if (supplierSort === "items-desc") return b.quantidade - a.quantidade || a.fornecedor.localeCompare(b.fornecedor, "pt-BR");
+      if (supplierSort === "sale-desc") return b.venda - a.venda || a.fornecedor.localeCompare(b.fornecedor, "pt-BR");
+      if (supplierSort === "profit-desc") return b.lucro - a.lucro || a.fornecedor.localeCompare(b.fornecedor, "pt-BR");
+      return b.custo - a.custo || a.fornecedor.localeCompare(b.fornecedor, "pt-BR");
+    });
+  }, [products, supplierQuery, supplierKindFilter, supplierSort]);
+
+  const supplierKinds = useMemo(() => [...new Set(products.filter(product => getInventoryStatus(product) === "ativo").map(product => product.kind).filter(Boolean))]
+    .map(kind => ({kind, label: KIND_META[kind]?.label || kind}))
+    .sort((a, b) => a.label.localeCompare(b.label, "pt-BR")), [products]);
+
+  const supplierTotals = useMemo(() => stockBySupplier.reduce((total, row) => ({
+    quantidade: total.quantidade + row.quantidade,
+    custo: total.custo + row.custo,
+    venda: total.venda + row.venda,
+    lucro: total.lucro + row.lucro,
+  }), {quantidade: 0, custo: 0, venda: 0, lucro: 0}), [stockBySupplier]);
+  const supplierMargin = supplierTotals.venda > 0 ? (supplierTotals.lucro / supplierTotals.venda) * 100 : 0;
+
+  const exportSupplierSummary = () => {
+    if (!stockBySupplier.length) return toast.error("Não há fornecedores com estoque para exportar.");
+    const worksheet = XLSX.utils.json_to_sheet(stockBySupplier.map(row => ({
+      Fornecedor: row.fornecedor,
+      "Itens disponíveis": row.quantidade,
+      "Valor em custo": row.custo,
+      "Valor em venda": row.venda,
+      "Lucro potencial": row.lucro,
+      "Margem (%)": row.margem,
+    })));
+    worksheet["!autofilter"] = {ref: worksheet["!ref"]};
+    worksheet["!cols"] = [{wch: 32},{wch: 18},{wch: 18},{wch: 18},{wch: 18},{wch: 14}];
+    const range = XLSX.utils.decode_range(worksheet["!ref"]);
+    for (let row = 1; row <= range.e.r; row += 1) [2,3,4].forEach(column => {
+      const cell = worksheet[XLSX.utils.encode_cell({r: row, c: column})];
+      if (cell) cell.z = 'R$ #,##0.00';
+    });
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Estoque por fornecedor");
+    XLSX.writeFile(workbook, `estoque-por-fornecedor-${toDateInputValue(new Date())}.xlsx`, {compression: true});
+    toast.success("Resumo por fornecedor exportado para Excel.");
+  };
+
+  const exportInventoryOverview = () => {
+    if (!filtered.length) return toast.error("Não há produtos para exportar com os filtros selecionados.");
+    const statusLabel = product => INVENTORY_STATUS_OPTIONS.find(option => option.value === getInventoryStatus(product))?.label || getInventoryStatus(product);
+    const rows = filtered.map(product => {
+      const quantity = product.kind === "acessorio" ? Number(product.quantidade || 0) : 1;
+      const repairTotal = (product.reparos || []).reduce((total, repair) => total + (Number(repair.valor) || 0), 0);
+      const unitCost = Number(product.custo || 0);
+      const unitSale = Number(product.venda || 0);
+      const totalCost = unitCost * quantity;
+      const totalSale = unitSale * quantity;
+      const profit = totalSale - totalCost;
+      return {
+        "Data de cadastro": product.criadoEm ? new Date(product.criadoEm).toLocaleString("pt-BR") : "",
+        "Situação": statusLabel(product),
+        "Produto": productDisplayName(product),
+        "Tipo": KIND_META[product.kind]?.label || product.kind,
+        "Categoria": product.categoria || "",
+        "Fabricante": product.fabricante || "",
+        "Modelo": product.modelo || "",
+        "Cor": product.cor || "",
+        "Memória": product.memoria || "",
+        "Bateria (%)": product.bateria ?? "",
+        "Acompanha caixa": product.caixa == null ? "" : product.caixa ? "Sim" : "Não",
+        "IMEI / Serial": product.identifier || "",
+        "Fornecedor": product.fornecedor || "Sem fornecedor",
+        "Quantidade": quantity,
+        "Custo base unitário": Number(product.custoBase ?? Math.max(0, unitCost - repairTotal)) || 0,
+        "Reparos por unidade": repairTotal,
+        "Custo final unitário": unitCost,
+        "Custo total": totalCost,
+        "Venda unitária": unitSale,
+        "Venda total": totalSale,
+        "Lucro potencial": profit,
+        "Margem sobre venda (%)": totalSale > 0 ? (profit / totalSale) * 100 : 0,
+        "Reparos": (product.reparos || []).map(repair => `${repair.descricao}: ${formatBRL(repair.valor)}`).join(" | "),
+        "Descrição": product.descricao || "",
+      };
+    });
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    worksheet["!autofilter"] = {ref: worksheet["!ref"]};
+    worksheet["!cols"] = [20,18,30,16,20,18,22,15,14,14,16,20,26,12,20,20,20,18,18,18,18,22,42,36].map(width => ({wch: width}));
+    const range = XLSX.utils.decode_range(worksheet["!ref"]);
+    for (let row = 1; row <= range.e.r; row += 1) [14,15,16,17,18,19,20].forEach(column => {
+      const cell = worksheet[XLSX.utils.encode_cell({r: row, c: column})];
+      if (cell) cell.z = 'R$ #,##0.00';
+    });
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Visão geral do estoque");
+    XLSX.writeFile(workbook, `estoque-geral-${toDateInputValue(new Date())}.xlsx`, {compression: true});
+    toast.success(`${rows.length} produtos exportados para Excel.`);
+  };
 
   const handleDelete = async () => {
     if (toDelete) {
@@ -2935,6 +3092,12 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
 
   return (
     <div>
+      <nav className="stock-view-tabs" aria-label="Visualizações do estoque">
+        <button type="button" className={stockView === "overview" ? "active" : ""} onClick={() => setStockView("overview")} aria-current={stockView === "overview" ? "page" : undefined}>Visão geral</button>
+        <button type="button" className={stockView === "supplier" ? "active" : ""} onClick={() => setStockView("supplier")} aria-current={stockView === "supplier" ? "page" : undefined}>Por Fornecedor</button>
+      </nav>
+
+      {stockView === "overview" ? <>
       <div className="stat-row stock-stat-row stock-quantity-stats">
         <div className="stat"><div className="sl">Itens em estoque</div><div className="sv">{stats.totalItens}</div></div>
         <div className="stat"><div className="sl">Itens vendidos</div><div className="sv">{stats.vendidos}</div></div>
@@ -2947,9 +3110,9 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
         <div className="stat"><div className="sl">Valor em custo</div><div className="sv">{formatBRL(stats.valorCusto)}</div></div>
         <div className="stat"><div className="sl">Valor em venda</div><div className="sv">{formatBRL(stats.valorVenda)}</div></div>
         <div className="stat"><div className="sl">Comissão sobre lucro ({stats.percentualComissao.toFixed(2)}%)</div><div className="sv">{formatBRL(stats.comissao)}</div></div>
-        <div className="stat"><div className="sl">Margem potencial</div><div className="sv">{stats.margemPotencialPct.toFixed(1)}%</div></div>
-        <div className="stat"><div className="sl">Lucro potencial</div><div className="sv">{formatBRL(stats.lucroPotencial)}</div></div>
-        <div className="stat"><div className="sl">Lucro após comissão</div><div className="sv">{formatBRL(stats.lucroAposComissao)}</div></div>
+        <div className="stat"><div className="sl">Margem potencial</div><div className={"sv" + (stats.margemPotencialPct < 0 ? " negative-margin" : "")}>{stats.margemPotencialPct.toFixed(1)}%</div></div>
+        <div className="stat"><div className="sl">Lucro potencial bruto</div><div className="sv">{formatBRL(stats.lucroPotencial)}</div></div>
+        <div className="stat"><div className="sl">Lucro potencial após comissão</div><div className="sv">{formatBRL(stats.lucroAposComissao)}</div></div>
       </div>
 
       <div className="inventory-filter-toolbar">
@@ -2999,6 +3162,9 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
         )}
       </fieldset>
       <div className="stock-actions-row">
+        <button className="btn sm" type="button" onClick={exportInventoryOverview} disabled={!filtered.length} title="Exportar os produtos exibidos pelos filtros atuais">
+          <i className="ti ti-file-spreadsheet" aria-hidden="true"></i>Exportar Excel
+        </button>
         <button className={"btn sm" + (approvalFilter ? " primary" : "")} type="button" onClick={() => setApprovalFilter(value => !value)} aria-pressed={approvalFilter}>
           <i className="ti ti-clock-check" aria-hidden="true"></i>Aguardando aprovação
         </button>
@@ -3091,6 +3257,47 @@ function Estoque({products, usersById, clientes, bandeiras, taxasCartao, default
               </tbody>
             </table>
             <Pagination className="list-pagination" page={currentPage} totalPages={totalPages} onChange={setPage}><div className="pagination-center"><PageSizeSelector value={pageSize} onChange={setPageSize} minimum={15} total={productGroups.length} /><span>Página {currentPage} de {totalPages} · {productGroups.length} {productGroups.length === 1 ? "registro" : "registros"}</span></div></Pagination>
+          </div>
+        </div>
+      )}
+      </> : (
+        <div className="supplier-stock-view" aria-labelledby="supplier-stock-title">
+          <h2 id="supplier-stock-title" className="sr-only">Por Fornecedor</h2>
+          <div className="stat-row stock-stat-row stock-value-stats supplier-stock-stats">
+            <div className="stat"><div className="sl">Fornecedores com estoque</div><div className="sv">{stockBySupplier.length}</div></div>
+            <div className="stat"><div className="sl">Itens disponíveis</div><div className="sv">{supplierTotals.quantidade}</div></div>
+            <div className="stat"><div className="sl">Valor em custo</div><div className="sv">{formatBRL(supplierTotals.custo)}</div></div>
+            <div className="stat"><div className="sl">Valor em venda</div><div className="sv">{formatBRL(supplierTotals.venda)}</div></div>
+            <div className="stat"><div className="sl">Lucro potencial</div><div className="sv">{formatBRL(supplierTotals.lucro)}</div></div>
+            <div className="stat"><div className="sl">Margem potencial</div><div className={"sv" + (supplierMargin < 0 ? " negative-margin" : "")}>{supplierMargin.toFixed(1)}%</div></div>
+          </div>
+          <div className="inventory-filter-toolbar supplier-filter-toolbar">
+            <div className="stock-bar inventory-filter-row supplier-stock-filters">
+              <SearchInput type="text" placeholder="Buscar fornecedor..." value={supplierQuery} onChange={event => setSupplierQuery(event.target.value)} />
+              <select className="filter-select" value={supplierKindFilter} onChange={event => setSupplierKindFilter(event.target.value)}><option value="">Todas as categorias</option>{supplierKinds.map(item => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select>
+              <select className="filter-select" value={supplierSort} onChange={event => setSupplierSort(event.target.value)}><option value="cost-desc">Maior custo</option><option value="sale-desc">Maior valor de venda</option><option value="profit-desc">Maior lucro</option><option value="items-desc">Mais itens</option><option value="name">Nome do fornecedor</option></select>
+            </div>
+            <div className="stock-actions-row">
+              {(supplierQuery || supplierKindFilter) && <button className="btn sm ghost" type="button" onClick={() => { setSupplierQuery(""); setSupplierKindFilter(""); }}>Limpar filtros</button>}
+              <button className="btn sm primary" type="button" onClick={exportSupplierSummary} disabled={!stockBySupplier.length}><i className="ti ti-file-spreadsheet" aria-hidden="true"></i>Exportar Excel</button>
+            </div>
+          </div>
+          <div className="panel supplier-stock-panel" style={{padding: "18px 8px"}}>
+            <div className="table-wrap supplier-stock-table-wrap"><table className="stock supplier-stock-table">
+              <thead><tr><th>Fornecedor</th><th>Itens disponíveis</th><th>Valor em custo</th><th>Valor em venda</th><th>Lucro potencial</th><th>Margem</th></tr></thead>
+              <tbody>
+                {stockBySupplier.length ? stockBySupplier.map(row => (
+                  <tr key={row.fornecedor}>
+                    <td><strong>{row.fornecedor}</strong></td>
+                    <td className="supplier-stock-number">{row.quantidade}</td>
+                    <td className="supplier-stock-number">{formatBRL(row.custo)}</td>
+                    <td className="supplier-stock-number supplier-stock-sale">{formatBRL(row.venda)}</td>
+                    <td className="supplier-stock-number supplier-stock-profit">{formatBRL(row.lucro)}</td>
+                    <td className={"supplier-stock-number" + (row.margem < 0 ? " negative-margin" : "")}>{row.margem.toFixed(1)}%</td>
+                  </tr>
+                )) : <tr><td colSpan="6" className="supplier-stock-empty">{supplierQuery || supplierKindFilter ? "Nenhum fornecedor encontrado com esses filtros." : "Nenhuma mercadoria ativa disponível. Produtos vendidos, inativos ou aguardando aprovação não entram neste saldo."}</td></tr>}
+              </tbody>
+            </table></div>
           </div>
         </div>
       )}
@@ -3615,7 +3822,6 @@ function PDV({products, historyProducts = [], clientes, suppliers, fabricantes =
   const [pagamentos, setPagamentos] = useState([]); // [{id, forma, valor, bandeira?, parcelas?}]
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
-  const [saleToast, setSaleToast] = useState(false);
   const [removeTarget, setRemoveTarget] = useState(null);
   const [discountTargetId, setDiscountTargetId] = useState(null);
   const [discountValue, setDiscountValue] = useState("");
@@ -3883,8 +4089,7 @@ function PDV({products, historyProducts = [], clientes, suppliers, fabricantes =
         total,
       });
       setReceipt({sale, tradeIns: tradeIns.map(item => ({...item}))});
-      setSaleToast(true);
-      setTimeout(() => setSaleToast(false), 2600);
+      toast.success("Venda registrada e estoque atualizado.");
       setCart([]);
       setTradeIns([]);
       setClienteSelecionadoId(null);
@@ -4084,9 +4289,6 @@ function PDV({products, historyProducts = [], clientes, suppliers, fabricantes =
         {finalizeError && <div className="auth-alert danger" style={{marginTop: 10}}>{finalizeError}</div>}
       </div>
 
-      {saleToast && (
-        <div className="toast"><i className="ti ti-circle-check" aria-hidden="true"></i>Venda registrada e estoque atualizado</div>
-      )}
 
       {showTradeModal && (
         <TradeInModal
@@ -4685,7 +4887,6 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
   const [savingCompany, setSavingCompany] = useState(false);
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [savingTaxas, setSavingTaxas] = useState(false);
-  const [toast, setToast] = useState("");
 
   const [novoModelo, setNovoModelo] = useState("");
   const [novoValor, setNovoValor] = useState("");
@@ -4703,7 +4904,7 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
   useEffect(() => setTaxas(taxasCartao), [taxasCartao]);
   useEffect(() => setCompany(companySettings), [companySettings]);
 
-  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2400); };
+  const showToast = (msg, variant = "success") => variant === "error" ? toast.error(msg) : toast.success(msg);
   const handleCompanyLogo = async event => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -4714,7 +4915,7 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
       setCompany(previous => ({...previous, logoData}));
       showToast("Logo carregada. Salve os dados da empresa para confirmar.");
     } catch (error) {
-      showToast(error.message || "Não foi possível carregar a logo.");
+      showToast(error.message || "Não foi possível carregar a logo.", "error");
     } finally {
       setUploadingLogo(false);
     }
@@ -4795,7 +4996,7 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
       downloadBlob(JSON.stringify(backup, null, 2), "application/json;charset=utf-8", `backup-supabase-${backupDate(backup.generatedAt)}.json`);
       showToast("Backup completo em JSON baixado");
     } catch (error) {
-      showToast(error.message || "Não foi possível gerar o backup");
+      showToast(error.message || "Não foi possível gerar o backup", "error");
     } finally {
       setExportingBackup("");
     }
@@ -4826,7 +5027,7 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
       XLSX.writeFile(workbook, `backup-supabase-${backupDate(backup.generatedAt)}.xlsx`, {compression: true});
       showToast("Backup em Excel baixado");
     } catch (error) {
-      showToast(error.message || "Não foi possível gerar o backup");
+      showToast(error.message || "Não foi possível gerar o backup", "error");
     } finally {
       setExportingBackup("");
     }
@@ -5012,10 +5213,6 @@ function Configuracoes({companySettings, protecaoPlanos, taxasCartao, bandeiras,
         </div>
         </div>
       </details>
-
-      {toast && (
-        <div className="toast"><i className="ti ti-circle-check" aria-hidden="true"></i>{toast}</div>
-      )}
 
       {showImport && (
         <ImportPlanosModal onConfirm={handleImportConfirm} onCancel={() => setShowImport(false)} />
@@ -5737,6 +5934,149 @@ function UserManagement({currentProfile}) {
   );
 }
 
+function SalesExcelReport({sales, users}) {
+  const [startDate, setStartDate] = useState(getDefaultStartDate);
+  const [endDate, setEndDate] = useState(() => toDateInputValue(new Date()));
+  const [supplierFilter, setSupplierFilter] = useState("");
+  const [sellerFilter, setSellerFilter] = useState("");
+  const [paymentFilter, setPaymentFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [query, setQuery] = useState("");
+  const usersById = useMemo(() => Object.fromEntries(users.map(user => [user.id, user])), [users]);
+  const paymentLabel = forma => FORMAS_PAGAMENTO.find(item => item.key === forma)?.label || forma || "Não informado";
+
+  const allRows = useMemo(() => sales.flatMap(sale => {
+    const seller = usersById[sale.criadoPor];
+    const activePayments = (sale.pagamentos || []).filter(payment => payment.status !== "estornado");
+    const paymentDescription = activePayments.map(payment => [
+      paymentLabel(payment.forma),
+      payment.bandeira,
+      payment.parcelas ? `${payment.parcelas}x` : null,
+      formatBRL(payment.valorBase ?? payment.valor),
+    ].filter(Boolean).join(" · ")).join(" | ") || "Não informado";
+    return (sale.itens || []).map(item => {
+      const product = item.productSnapshot || {};
+      const quantity = Number(item.quantidade) || 1;
+      const totalCost = saleItemFrozenCost(item);
+      const totalSale = (Number(item.vendaUnit) || 0) * quantity;
+      return {
+        id: `${sale.id}-${item.id}`,
+        saleId: sale.id,
+        dateIso: sale.criadoEm,
+        dateLabel: sale.criadoEm ? new Date(sale.criadoEm).toLocaleString("pt-BR") : "",
+        saleStatus: sale.status || "ativo",
+        itemStatus: item.status || "ativo",
+        productName: item.nome || productDisplayName(product) || "Produto não informado",
+        kind: KIND_META[item.kind]?.label || item.kind || item.tipo || "Não informado",
+        manufacturer: product.fabricante || "",
+        model: product.modelo || "",
+        identifier: product.identifier || "",
+        supplier: String(product.fornecedor || "").trim() || "Sem fornecedor",
+        quantity,
+        unitCost: quantity ? totalCost / quantity : 0,
+        repairCost: Number(item.reparosSnapshot) || 0,
+        totalCost,
+        unitSale: Number(item.vendaUnit) || 0,
+        totalSale,
+        grossProfit: totalSale - totalCost,
+        client: sale.cliente?.nome || "Não informado",
+        contact: sale.cliente?.contato || "",
+        sellerId: sale.criadoPor || "",
+        seller: seller?.full_name || seller?.email || "Não identificado",
+        paymentForms: activePayments.map(payment => payment.forma),
+        paymentDescription,
+        cardBrands: [...new Set(activePayments.map(payment => payment.bandeira).filter(Boolean))].join(" | "),
+        installments: [...new Set(activePayments.map(payment => payment.parcelas).filter(Boolean))].join(" | "),
+        cardRate: [...new Set(activePayments.map(payment => Number(payment.taxaPct) || 0).filter(rate => rate > 0))].join(" | "),
+        cardFee: activePayments.reduce((total, payment) => total + (Number(payment.valorTaxa) || 0), 0),
+      };
+    });
+  }), [sales, usersById]);
+
+  const suppliers = useMemo(() => [...new Set(allRows.map(row => row.supplier))].sort((a, b) => a.localeCompare(b, "pt-BR")), [allRows]);
+  const filteredRows = useMemo(() => {
+    const term = query.trim().toLocaleLowerCase("pt-BR");
+    return allRows.filter(row => {
+      if (!isWithinDateRange(row.dateIso, startDate, endDate)) return false;
+      if (supplierFilter && row.supplier !== supplierFilter) return false;
+      if (sellerFilter && row.sellerId !== sellerFilter) return false;
+      if (paymentFilter && !row.paymentForms.includes(paymentFilter)) return false;
+      if (statusFilter && row.saleStatus !== statusFilter && row.itemStatus !== statusFilter) return false;
+      if (term && ![row.productName, row.identifier, row.model, row.supplier, row.client, row.seller, row.saleId].join(" ").toLocaleLowerCase("pt-BR").includes(term)) return false;
+      return true;
+    });
+  }, [allRows, startDate, endDate, supplierFilter, sellerFilter, paymentFilter, statusFilter, query]);
+
+  const exportExcel = () => {
+    if (!filteredRows.length) return toast.error("Não há linhas para exportar com os filtros selecionados.");
+    const exportRows = filteredRows.map(row => ({
+      "Data da venda": row.dateLabel,
+      "Código da venda": row.saleId,
+      "Status da venda": row.saleStatus,
+      "Status do item": row.itemStatus,
+      "Produto": row.productName,
+      "Tipo": row.kind,
+      "Fabricante": row.manufacturer,
+      "Modelo": row.model,
+      "IMEI / Serial": row.identifier,
+      "Fornecedor": row.supplier,
+      "Quantidade": row.quantity,
+      "Custo unitário": row.unitCost,
+      "Reparos por unidade": row.repairCost,
+      "Custo total": row.totalCost,
+      "Venda unitária": row.unitSale,
+      "Venda total": row.totalSale,
+      "Lucro bruto": row.grossProfit,
+      "Cliente": row.client,
+      "Contato": row.contact,
+      "Vendedor": row.seller,
+      "Pagamentos da venda": row.paymentDescription,
+      "Bandeiras": row.cardBrands,
+      "Parcelas": row.installments,
+      "Taxa do cartão (%)": row.cardRate,
+      "Valor da taxa": row.cardFee,
+    }));
+    const worksheet = XLSX.utils.json_to_sheet(exportRows);
+    worksheet["!autofilter"] = {ref: worksheet["!ref"]};
+    worksheet["!cols"] = [18,38,18,16,30,16,18,22,20,24,12,16,18,16,16,16,16,24,18,24,48,18,12,18,16].map(width => ({wch: width}));
+    const currencyColumns = new Set([11,12,13,14,15,16,24]);
+    const range = XLSX.utils.decode_range(worksheet["!ref"]);
+    for (let row = 1; row <= range.e.r; row += 1) currencyColumns.forEach(column => {
+      const cell = worksheet[XLSX.utils.encode_cell({r: row, c: column})];
+      if (cell) cell.z = 'R$ #,##0.00';
+    });
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Vendas por produto");
+    XLSX.writeFile(workbook, `relatorio-vendas-${startDate || "inicio"}-a-${endDate || "hoje"}.xlsx`, {compression: true});
+    toast.success(`${filteredRows.length} linhas exportadas para Excel.`);
+  };
+
+  const totals = useMemo(() => filteredRows.reduce((result, row) => ({
+    quantity: result.quantity + row.quantity,
+    cost: result.cost + row.totalCost,
+    sale: result.sale + row.totalSale,
+    profit: result.profit + row.grossProfit,
+  }), {quantity: 0, cost: 0, sale: 0, profit: 0}), [filteredRows]);
+
+  return <main className="reports-page">
+    <section className="panel reports-panel">
+      <div className="panel-head"><div><h2><i className="ti ti-file-spreadsheet" aria-hidden="true"></i>Relatório detalhado de vendas</h2><span className="sub">uma linha por produto ou serviço vendido</span></div><button className="btn primary" type="button" onClick={exportExcel} disabled={!filteredRows.length}><i className="ti ti-download" aria-hidden="true"></i>Exportar Excel</button></div>
+      <div className="reports-filters">
+        <SearchInput type="text" placeholder="Produto, IMEI, cliente, fornecedor..." value={query} onChange={event => setQuery(event.target.value)} />
+        <label><span>Data inicial</span><input type="date" value={startDate} max={endDate || undefined} onChange={event => setStartDate(event.target.value)} /></label>
+        <label><span>Data final</span><input type="date" value={endDate} min={startDate || undefined} onChange={event => setEndDate(event.target.value)} /></label>
+        <select className="filter-select" value={supplierFilter} onChange={event => setSupplierFilter(event.target.value)}><option value="">Todos os fornecedores</option>{suppliers.map(supplier => <option key={supplier} value={supplier}>{supplier}</option>)}</select>
+        <select className="filter-select" value={sellerFilter} onChange={event => setSellerFilter(event.target.value)}><option value="">Todos os vendedores</option>{users.map(user => <option key={user.id} value={user.id}>{user.full_name || user.email}</option>)}</select>
+        <select className="filter-select" value={paymentFilter} onChange={event => setPaymentFilter(event.target.value)}><option value="">Todos os pagamentos</option>{FORMAS_PAGAMENTO.map(payment => <option key={payment.key} value={payment.key}>{payment.label}</option>)}</select>
+        <select className="filter-select" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="">Todos os status</option><option value="ativo">Ativos</option><option value="estornado">Estornados</option><option value="trocado">Trocados</option><option value="estornada">Vendas estornadas</option><option value="parcialmente_estornada">Parcialmente estornadas</option></select>
+      </div>
+      <div className="report-totals"><div><span>Linhas</span><strong>{filteredRows.length}</strong></div><div><span>Unidades</span><strong>{totals.quantity}</strong></div><div><span>Custo</span><strong>{formatBRL(totals.cost)}</strong></div><div><span>Venda</span><strong>{formatBRL(totals.sale)}</strong></div><div><span>Lucro bruto</span><strong>{formatBRL(totals.profit)}</strong></div></div>
+      <p className="reports-payment-note">Em vendas com pagamento misto, todas as formas aparecem juntas na linha do produto. Os valores de pagamento são informativos e não entram novamente nos totais.</p>
+      <div className="reports-table-wrap"><table className="stock reports-table"><thead><tr><th>Data</th><th>Produto</th><th>IMEI / Serial</th><th>Fornecedor</th><th>Qtd.</th><th>Custo total</th><th>Venda total</th><th>Lucro</th><th>Pagamento</th><th>Cliente</th><th>Vendedor</th></tr></thead><tbody>{filteredRows.length ? filteredRows.map(row => <tr key={row.id}><td>{row.dateLabel}</td><td><strong>{row.productName}</strong><small>{[row.kind,row.model].filter(Boolean).join(" · ")}</small></td><td className="mono">{row.identifier || "—"}</td><td>{row.supplier}</td><td className="mono">{row.quantity}</td><td className="mono">{formatBRL(row.totalCost)}</td><td className="mono">{formatBRL(row.totalSale)}</td><td className="mono report-profit">{formatBRL(row.grossProfit)}</td><td>{row.paymentDescription}</td><td>{row.client}</td><td>{row.seller}</td></tr>) : <tr><td colSpan="11" className="supplier-stock-empty">Nenhum resultado encontrado.</td></tr>}</tbody></table></div>
+    </section>
+  </main>;
+}
+
 /* =========================================================================
 
    APP
@@ -6372,6 +6712,11 @@ function EstoqueApp() {
             <i className="ti ti-receipt" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Vendas<span className="n">{sales.length}</span>
           </button>
         )}
+        {allowedTabs.includes("relatorios") && (
+          <button className={tab === "relatorios" ? "active" : ""} onClick={() => setTab("relatorios")}>
+            <i className="ti ti-file-spreadsheet" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Relatórios
+          </button>
+        )}
         {allowedTabs.includes("comissoes") && (
           <button className={tab === "comissoes" ? "active" : ""} onClick={() => setTab("comissoes")}>
             <i className="ti ti-percentage" aria-hidden="true" style={{marginRight: 6, fontSize: 13}}></i>Comissoes
@@ -6458,6 +6803,8 @@ function EstoqueApp() {
             reload={load}
             onEstornarVenda={handleEstornarVenda}
           /></VendasPage>
+      ) : tab === "relatorios" ? (
+        <SalesExcelReport sales={sales} users={userProfiles} />
       ) : tab === "comissoes" ? (
         <CommissionsPanel sales={sales} users={userProfiles} products={products} clientes={clientes} companySettings={companySettings} rates={commissionRates} defaultRate={defaultCommissionRate} commissionMovements={commissionMovements} accessToken={session?.access_token} onSaveRates={handleSaveCommissionRates} onEstornarVenda={handleEstornarVenda} />
       ) : tab === "usuarios" ? (
